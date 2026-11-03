@@ -1,0 +1,2628 @@
+\documentclass[11pt]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{float}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\newcommand{\pkg}[1]{\texttt{#1}}
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+\renewcommand{\qedsymbol}{$\blacksquare$}
+
+\title{\textbf{Research and Teaching Extensions to the PSAT 2.1.11\\
+Power System Analysis Toolbox}\\[0.3em]
+\large A Technical Report on Architecture, Mathematical Formulations,\\
+Verification Methodology, and Test Results}
+\author{Prof. Robert A. Sowah\\
+\small Control and Optimization in Energy Networks\\
+\small Power Systems Laboratory, PSAT-Based Toolbox Extensions Project}
+\date{19 October 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+PSAT 2.1.11 (Power System Analysis Toolbox, F.\ Milano) is a mature
+MATLAB-based research tool for power-flow, continuation power-flow,
+optimal power-flow, and time-domain/small-signal dynamic analysis. As
+shipped, it has no documented data schema, no structured results API, no
+distributed or uncertainty-aware optimization capability, no storage or
+grid-forming-inverter device model, no cyberattack or market-economics
+tooling, and no machine-learning or reinforcement-learning interface.
+This report documents a coordinated set of extensions -- 25 Python
+modules, 31 MATLAB functions, and two genuine new PSAT device classes
+registered into PSAT's own class system (\pkg{@ESSclass},
+\pkg{@GFMclass}) -- built to close these gaps for graduate teaching and
+for modern power-systems research, without modifying any of PSAT's
+existing, working behaviour. Every capability reported here was verified
+against an independent method, a known closed-form result, or a live
+PSAT/MATLAB session before being accepted; this report documents not
+only the final, working mathematics but, where instructive, the genuine
+defects found and corrected during development, since several of them
+recur across more than one module and are worth recording as general
+lessons. Beyond stating each extension's governing equations, this
+report develops their theoretical basis formally: a dedicated
+Mathematical Preliminaries chapter establishes the convex-duality,
+fixed-point, graph-spectral, probabilistic, and optimal-control results
+every later chapter draws on, and each subsequent chapter states its
+own load-bearing claims as numbered Theorems, Lemmas, Propositions, and
+Corollaries with proofs -- 36 such results in total, including a formal
+Bertsimas--Sim robust-counterpart derivation, an exact two-directional
+characterization of undetectable false-data-injection attacks, a
+Sherman--Morrison derivation of the line-outage distribution factor, a
+Riccati-recursion proof that receding-horizon MPC converges to the
+infinite-horizon LQR gain, and a Routh--Hurwitz derivation of the
+multi-machine small-signal $90^\circ$ instability threshold --
+referencing standard graduate texts (Boyd \& Vandenberghe, Bertsekas,
+Horn \& Johnson, Abur \& Exp\'osito, Kundur, and others) throughout,
+rather than asserting results without derivation. The report is
+organised by capability area: mathematical preliminaries, core
+workflow/schema extensions, deep-integration device classes, distribution
+and fault analysis, optimization and dispatch under uncertainty, security
+and resilience, control, learning-based methods, uncertainty
+quantification, and MATPOWER interoperability. A full nomenclature table,
+rigorously derived mathematical formulations, and consolidated
+test-case results accompany each area.
+\end{abstract}
+
+\tableofcontents
+
+%=============================================================
+\chapter{Introduction}
+%=============================================================
+
+\section{Motivation}
+
+PSAT 2.1.11 is widely used for teaching power-flow, continuation
+power-flow (voltage-stability), optimal power-flow, and
+time-domain/small-signal dynamic analysis, and it ships with roughly
+forty ready-made test systems. It is, however, a \emph{research} tool
+first: its device classes (\pkg{@SYclass}, \pkg{@EXclass},
+\pkg{@TGclass}, \pkg{@PQclass}, \ldots) have undocumented column
+schemas; its results are scattered across global variables with no
+structured API; its optimization capability (\texttt{opf}) is a single
+deterministic, centralized solve; and it has no native model at all for
+battery storage, grid-forming inverters, gas-electric coupling, market
+economics, cyberattack surfaces, or learning-based surrogates --
+capabilities now standard in the modern power-systems research
+literature and in this course's own 16-week syllabus.
+
+This project closes each of those gaps with a self-contained extension,
+built and verified in either Python (as a reusable library depending
+only on \pkg{numpy}/\pkg{scipy}/\pkg{cvxpy}/\pkg{networkx}/\pkg{torch}/
+\pkg{gymnasium}) or MATLAB (as a function operating on PSAT's own loaded
+data, or as a PSAT-native device class), or both.
+
+\section{Design principles}
+
+Four principles were applied uniformly across every extension in this
+report:
+
+\begin{enumerate}
+\item \textbf{Additive, non-destructive integration.} No existing PSAT
+  behaviour was changed. The two new device classes
+  (\S\ref{ch:deviceclasses}) were wired into PSAT's core dispatch files
+  by \emph{adding} lines that reference the new device type; every
+  original file was backed up before editing.
+\item \textbf{Test before embed.} Every numeric claim in this report was
+  produced by code that was actually executed, not assumed correct by
+  inspection. Wherever an independent cross-check existed (a brute-force
+  enumeration, a different solver, a closed-form textbook result, a
+  second programming language), it was used.
+\item \textbf{Honest reporting of negative and null results.} Several
+  extensions report a finding that did \emph{not} go the way a first
+  intuition expected (\S\ref{ch:learning}, \S\ref{ch:resilience}); these
+  are reported as found, not adjusted to look better.
+\item \textbf{Cross-language parity.} Every Python module with a natural
+  PSAT-side analogue has a MATLAB port, tested live against a running
+  MATLAB R2026a/PSAT 2.1.11 session (not merely written to look
+  plausible). Table~\ref{tab:parity} in \S\ref{ch:verification} gives the
+  complete parity map.
+\end{enumerate}
+
+\section{Report structure}
+
+Chapter~\ref{ch:nomenclature} is a complete nomenclature table.
+Chapter~\ref{ch:prelim} collects, with full proofs or precise
+citations, every piece of convex-optimization, fixed-point, graph-linear-
+algebra, probability, and optimal-control theory invoked more than once
+later in the report, so that each later chapter can cite a numbered
+result rather than re-derive it. Chapter~\ref{ch:architecture} describes
+the data schema and I/O layer every other extension builds on.
+Chapters~\ref{ch:deviceclasses}--\ref{ch:interop} cover each capability
+area in turn: mathematical formulation (stated, where the result is
+load-bearing, as a numbered Theorem/Lemma/Proposition with a proof, not
+only an equation), algorithm, and verified test-case results. Every
+Theorem, Lemma, Proposition, and Corollary in the report shares one
+numbering sequence per chapter (e.g.\ Theorem~\ref{thm:bertsimas-sim} is
+the one and only ``Theorem 7.6''), so a forward or backward
+cross-reference always resolves unambiguously.
+Chapter~\ref{ch:verification} gives the cross-language parity map and a
+consolidated log of every genuine defect found during development -- a
+resource in its own right, since several of these defects
+(sign-convention bugs, slack-bus formulation errors, nested-function
+closures) recur in predictable, nameable ways. Chapter~\ref{ch:limitations}
+states every known limitation plainly. Chapter~\ref{ch:conclusion}
+concludes.
+
+%=============================================================
+\chapter{Nomenclature}
+\label{ch:nomenclature}
+%=============================================================
+
+Symbols are grouped by the subject area in which they are used; several
+letters (e.g.\ $H$, $K$) are reused across areas with different meanings,
+as is standard in the power-systems literature -- the local meaning is
+always restated at first use within each section.
+
+\section{Network and power-flow quantities}
+\begin{longtable}{@{}p{3cm}p{11.5cm}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\endhead
+$n$, $m$ & Number of buses; number of branches/lines. \\
+$\theta_i$ & Voltage phase angle at bus $i$ (rad). \\
+$V_i$ & Voltage magnitude at bus $i$ (pu). \\
+$B$, $B'$ & Full and reduced (non-slack) nodal susceptance (Laplacian-like) matrix. \\
+$Y_{\text{bus}}$, $Z_{\text{bus}}$ & Bus admittance matrix and its inverse, the bus impedance matrix. \\
+$P_{g,i}$, $P_{d,i}$ & Real power generation and demand at bus $i$. \\
+$\text{PTDF}$ & Power Transfer Distribution Factor matrix, $\partial(\text{flow})/\partial(\text{injection})$. \\
+$\text{LODF}_{l,k}$ & Line Outage Distribution Factor: fraction of outaged line $k$'s pre-contingency flow redistributed onto monitored line $l$. \\
+$\text{rate}A$ & Thermal flow rating of a line (MW or pu). \\
+\bottomrule
+\end{longtable}
+
+\section{Optimization quantities}
+\begin{longtable}{@{}p{3cm}p{11.5cm}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\endhead
+$a_i, b_i$ & Quadratic and linear generator cost coefficients, $\text{cost}_i(P)=a_iP^2+b_iP$. \\
+$\lambda$ & Lagrange multiplier / shadow price of a power-balance equality constraint (the system marginal cost, or locational marginal price, LMP). \\
+$\Gamma$ & Bertsimas--Sim ``budget of uncertainty'' (number of uncertain parameters simultaneously allowed to reach their worst case). \\
+$\hat{d}_i$ & Known deviation magnitude of uncertain parameter $i$; true value $d_i=d_i^{\text{nom}}+\xi_i\hat d_i$, $\xi_i\in[-1,1]$. \\
+$\rho$ & ADMM penalty parameter. \\
+$z$, $u$ & ADMM global consensus variable and scaled dual variable. \\
+$W$ & Metropolis--Hastings consensus weight matrix (symmetric, doubly stochastic). \\
+$\text{VSS}$ & Value of the Stochastic Solution (expected-value solution cost minus two-stage recourse cost). \\
+\bottomrule
+\end{longtable}
+
+\section{Dynamics and control quantities}
+\begin{longtable}{@{}p{3cm}p{11.5cm}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\endhead
+$H_i$ & Inertia constant of machine/virtual machine $i$ (s). \\
+$D_i$ & Damping coefficient of machine/area $i$ (pu/pu). \\
+$\omega$ & Per-unit rotor (or virtual-rotor) speed, nominal 1. \\
+$K_{ij}(\theta^\star)$ & Synchronizing-power (small-signal stiffness) coefficient, $B_{ij}\cos(\theta_i^\star-\theta_j^\star)$. \\
+$A,B,C,D$ (state space) & Continuous-time linear state-space matrices, $\dot x = Ax+Bu$, $y=Cx+Du$. \\
+$A_d, B_d$ & Zero-order-hold discretized equivalents of $A, B$. \\
+$Q,R_w$ & State and input quadratic-cost weighting matrices for LQR/MPC. \\
+$K_{\text{lqr}}$ & Infinite-horizon LQR gain, from the discrete algebraic Riccati equation (DARE). \\
+$\text{ACE}_k$ & Area control error of area $k$: tie-line flow deviation plus frequency-bias term. \\
+\bottomrule
+\end{longtable}
+
+\section{State estimation and security quantities}
+\begin{longtable}{@{}p{3cm}p{11.5cm}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\endhead
+$H$ (measurement) & Measurement Jacobian, $m\times n$ ($m$ measurements, $n$ state variables). \\
+$z$ (measurement) & Measurement vector. \\
+$R$ & Measurement noise covariance (diagonal). \\
+$\hat x$ & Weighted-least-squares state estimate. \\
+$J$ & Chi-square bad-data detection statistic, $J=r^\top R^{-1}r$. \\
+$a$ & Measurement attack vector; a \emph{stealthy} attack satisfies $a=Hc$ for some state-shift vector $c$. \\
+\bottomrule
+\end{longtable}
+
+\section{Gas-network and thermal-rating quantities}
+\begin{longtable}{@{}p{3cm}p{11.5cm}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\endhead
+$p_i$ & Nodal gas pressure (pressure plays the role voltage plays in power flow). \\
+$K_{ij}$ (Weymouth) & Weymouth constant of pipe $(i,j)$. \\
+$q_{ij}$ & Steady-state gas flow on pipe $(i,j)$. \\
+$I_{\max}$ & Dynamic conductor ampacity (A), from the IEEE 738 heat balance. \\
+$q_c, q_r, q_s$ & Convective, radiative, and solar heat flux terms (W/m). \\
+$R(T_c)$ & Conductor AC resistance at conductor temperature $T_c$. \\
+\bottomrule
+\end{longtable}
+
+\section{Learning-based-method quantities}
+\begin{longtable}{@{}p{3cm}p{11.5cm}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\endhead
+$x_v$ & Node feature vector (GNN). \\
+$e_{uv}$ & Edge feature vector (GNN). \\
+$\text{msg}_{uv}$ & Message computed on directed edge $u\to v$. \\
+$\text{agg}_v$ & Sum-aggregated incoming messages at node $v$. \\
+$s_t, a_t, r_t$ & RL state, action, and reward at time $t$. \\
+$\gamma_{\text{RL}}$ & Reinforcement-learning discount factor. \\
+\bottomrule
+\end{longtable}
+
+%=============================================================
+\chapter{Mathematical Preliminaries}
+\label{ch:prelim}
+%=============================================================
+
+Every later chapter invokes one or more of five bodies of theory:
+convex optimization and duality, fixed-point/contraction arguments,
+structured linear algebra on graphs, probability theory for Gaussian
+and quadratic-form random variables, and discrete-time optimal control.
+This chapter states each result once, in the generality needed later,
+with a proof or a precise citation to a standard graduate reference, so
+that every subsequent chapter can invoke it by number rather than
+re-deriving it. Readers already fluent in this material may skip to
+Chapter~\ref{ch:architecture}; readers who want full proofs beyond the
+sketches given here are pointed to the cited source at each result.
+
+\section{Convex optimization, Lagrangian duality, and KKT conditions}
+\label{sec:convex-prelim}
+
+\begin{definition}[Convex set and convex function]
+A set $C\subseteq\mathbb{R}^n$ is \emph{convex} if
+$\lambda x+(1-\lambda)y\in C$ for all $x,y\in C$, $\lambda\in[0,1]$. A
+function $f:C\to\mathbb{R}$ is convex if its epigraph is convex,
+equivalently $f(\lambda x+(1-\lambda)y)\le \lambda f(x)+(1-\lambda)f(y)$
+for all $x,y\in C$, $\lambda\in[0,1]$; $f$ is \emph{strictly convex} if
+the inequality is strict whenever $x\ne y$, $\lambda\in(0,1)$.
+\end{definition}
+
+\begin{definition}[Primal problem and Lagrangian]
+\label{def:primal}
+Consider
+\begin{equation}
+\min_{x\in\mathbb{R}^n}\; f_0(x) \quad\text{s.t.}\quad g_i(x)\le0 \;(i=1,\ldots,m), \quad h_j(x)=0 \;(j=1,\ldots,p),
+\label{eq:primal}
+\end{equation}
+with $f_0,g_i$ convex and $h_j$ affine. The Lagrangian is
+$L(x,\mu,\nu)=f_0(x)+\sum_i\mu_ig_i(x)+\sum_j\nu_jh_j(x)$, $\mu\ge0$, and
+the dual function is $d(\mu,\nu)=\inf_x L(x,\mu,\nu)$.
+\end{definition}
+
+\begin{assumption}[Slater's condition]
+\label{as:slater}
+There exists a strictly feasible point $\tilde x$ with $g_i(\tilde
+x)<0$ for every $i$ and $h_j(\tilde x)=0$ for every $j$.
+\end{assumption}
+
+\begin{theorem}[Strong duality and KKT necessity]
+\label{thm:strong-duality}
+Under Assumption~\ref{as:slater}, if $x^\star$ solves the primal
+problem above then there exist $\mu^\star\ge0,\nu^\star$ (dual
+optimal, attaining the primal optimal value with zero duality gap) such
+that the following Karush--Kuhn--Tucker (KKT) conditions hold:
+\begin{gather}
+\nabla f_0(x^\star)+\textstyle\sum_i\mu_i^\star\nabla g_i(x^\star)+\sum_j\nu_j^\star\nabla h_j(x^\star) = 0 \quad\text{(stationarity)}\\
+g_i(x^\star)\le0,\; h_j(x^\star)=0 \quad\text{(primal feasibility)}\\
+\mu_i^\star\ge0 \quad\text{(dual feasibility)}\\
+\mu_i^\star g_i(x^\star)=0 \;\; \forall i \quad\text{(complementary slackness)}
+\end{gather}
+Conversely, for a convex problem, any $(x,\mu,\nu)$ satisfying the KKT
+conditions is primal-dual optimal (sufficiency).
+\end{theorem}
+\begin{proof}[Proof sketch]
+Slater's condition rules out a duality gap for convex problems (Boyd \&
+Vandenberghe~\cite{boydconvex}, Ch.~5): strong duality
+$f_0(x^\star)=d(\mu^\star,\nu^\star)$ holds, and since
+$d(\mu^\star,\nu^\star)=\inf_x L(x,\mu^\star,\nu^\star)\le
+L(x^\star,\mu^\star,\nu^\star)=f_0(x^\star)+\sum_i\mu_i^\star
+g_i(x^\star)\le f_0(x^\star)$ (the last step using $\mu^\star\ge0$,
+$g_i(x^\star)\le0$), equality throughout forces both the complementary
+slackness condition above and that $x^\star$ minimizes
+$L(\cdot,\mu^\star,\nu^\star)$, which for differentiable $f_0,g_i,h_j$
+gives the stationarity condition above. Sufficiency for convex problems
+follows because the KKT stationarity condition makes $x$ a global
+minimizer of the convex function $L(\cdot,\mu,\nu)$, and complementary
+slackness then equates $L(x,\mu,\nu)$ with $f_0(x)$.
+\end{proof}
+
+\begin{remark}
+Theorem~\ref{thm:strong-duality} is the formal basis for every dual
+variable interpreted as a price or shadow price in this report (the LMP
+of \S\ref{sec:merit-order-theory}, the reserve price of
+\S\ref{sec:chance-theory}, the ADMM/dual-decomposition prices of
+\S\ref{sec:decomp-theory}): complementary slackness is exactly why a
+non-binding constraint has zero price and a binding constraint's price
+equals the constraint's marginal effect on the optimal objective (the
+envelope-theorem reading of the stationarity condition).
+\end{remark}
+
+\section{Fixed-point and contraction-mapping results}
+\label{sec:fixedpoint-prelim}
+
+\begin{definition}[Contraction]
+A map $T:X\to X$ on a complete metric space $(X,d)$ is a
+\emph{contraction} with modulus $0\le\gamma<1$ if
+$d(T(x),T(y))\le\gamma\, d(x,y)$ for all $x,y\in X$.
+\end{definition}
+
+\begin{theorem}[Banach fixed-point theorem]
+\label{thm:banach}
+If $T:X\to X$ is a contraction on a complete metric space, then $T$ has
+a unique fixed point $x^\star=T(x^\star)$, and for any $x_0\in X$ the
+iterates $x_{k+1}=T(x_k)$ converge to $x^\star$ geometrically,
+$d(x_k,x^\star)\le\gamma^k d(x_0,x^\star)$.
+\end{theorem}
+\begin{proof}
+Standard; see Bertsekas~\cite{bertsekasDP}, Appendix~B, or any real
+analysis text. Existence/uniqueness follow from showing $(x_k)$ is
+Cauchy (via the triangle inequality and $\sum\gamma^k<\infty$) and that
+the limit is fixed by continuity of $T$; the rate bound follows by
+induction on $d(x_{k+1},x^\star)=d(T(x_k),T(x^\star))\le\gamma\,
+d(x_k,x^\star)$.
+\end{proof}
+
+\begin{remark}
+Theorem~\ref{thm:banach} underlies two independent results used later:
+the Bellman-operator contraction behind tabular Q-learning/value
+iteration (\S\ref{sec:rl-theory}), and, via the spectral-radius argument
+of \S\ref{sec:graph-prelim}, the geometric convergence of Metropolis--
+Hastings consensus averaging (\S\ref{sec:decomp-theory}).
+\end{remark}
+
+\section{Structured linear algebra on graphs}
+\label{sec:graph-prelim}
+
+\begin{definition}[Weighted graph Laplacian]
+For a connected graph with $n$ nodes, edge admittances $y_{ij}>0$, the
+(weighted) Laplacian $B\in\mathbb{R}^{n\times n}$ has
+$B_{ii}=\sum_{j\sim i}y_{ij}$, $B_{ij}=-y_{ij}$ for $i\sim j$, $0$
+otherwise.
+\end{definition}
+
+\begin{theorem}[Laplacian rank and the reduced system]
+\label{thm:laplacian}
+$B$ is symmetric positive semi-definite with exactly one zero
+eigenvalue (eigenvector $\mathbf{1}$) if and only if the graph is
+connected. Consequently, deleting any one row/column (the reference
+bus) from $B$ gives a principal submatrix $B'$ that is symmetric
+positive definite, hence invertible.
+\end{theorem}
+\begin{proof}
+For any $x\in\mathbb{R}^n$, $x^\top Bx=\sum_{i\sim j}y_{ij}(x_i-x_j)^2\ge0$,
+so $B\succeq0$; equality holds iff $x_i=x_j$ for every edge, i.e.\ iff
+$x$ is constant on each connected component, giving a null space of
+dimension equal to the number of components (one, under connectivity) --
+this is the standard Kirchhoff/Matrix-Tree argument (see Horn \&
+Johnson~\cite{hornjohnson}, \S13.4, or Godsil \& Royle, \emph{Algebraic
+Graph Theory}). A symmetric PSD matrix with a single zero eigenvalue has
+every principal submatrix obtained by deleting one row/column strictly
+positive definite, because the deleted-coordinate quadratic form
+$x'^\top B'x'$ (extending $x'$ by a zero in the deleted coordinate) can
+only vanish for $x'=0$, since the unique null direction $\mathbf 1$ has a
+nonzero entry at the deleted coordinate.
+\end{proof}
+
+\begin{remark}
+Theorem~\ref{thm:laplacian} is why every DC-network formulation in this
+report (Chapters~\ref{ch:optimization}, \ref{ch:resilience}) fixes one
+reference-bus angle and solves only the reduced system $B'\theta'=P'$: it
+is the formal reason $B'$ is guaranteed nonsingular whenever the network
+is connected, matching the main course's own Theorem~1 treatment of the
+identical fact for AC power flow's own $Y_{\text{bus}}$-derived
+Jacobian structure.
+\end{remark}
+
+\begin{theorem}[Sherman--Morrison rank-one update]
+\label{thm:sherman-morrison}
+For invertible $A\in\mathbb{R}^{n\times n}$ and $u,v\in\mathbb{R}^n$
+with $1+v^\top A^{-1}u\ne0$,
+\begin{equation}
+(A+uv^\top)^{-1} = A^{-1} - \frac{A^{-1}uv^\top A^{-1}}{1+v^\top A^{-1}u}.
+\label{eq:sherman-morrison}
+\end{equation}
+\end{theorem}
+\begin{proof}
+Multiply the right-hand side by $(A+uv^\top)$ and simplify using
+$v^\top A^{-1}u$ as a scalar; the cross terms telescope to the identity.
+See Horn \& Johnson~\cite{hornjohnson}, \S0.7.4, or Golub \& Van
+Loan~\cite{golubvanloan}, \S2.1.3.
+\end{proof}
+
+\begin{theorem}[Doubly stochastic consensus convergence]
+\label{thm:doubly-stochastic}
+Let $W\in\mathbb{R}^{n\times n}$ be symmetric, doubly stochastic
+($W\mathbf 1=\mathbf 1$, $W=W^\top$, $W\ge0$ entrywise), and
+irreducible (the underlying communication graph is connected). Then the
+eigenvalues of $W$ satisfy $1=\mu_1>\mu_2\ge\cdots\ge\mu_n\ge-1$, and
+for any $x_0\in\mathbb{R}^n$,
+\begin{equation}
+W^k x_0 \;\longrightarrow\; \bar x\,\mathbf 1, \qquad \bar x=\tfrac1n\textstyle\sum_i x_{0,i},
+\label{eq:consensus-limit}
+\end{equation}
+at the geometric rate $\|W^kx_0-\bar x\mathbf 1\|_2\le \left|\mu_2\right|^k\|x_0-\bar
+x\mathbf1\|_2$.
+\end{theorem}
+\begin{proof}
+By the spectral theorem, symmetric $W$ has an orthonormal eigenbasis;
+$\mathbf1$ is an eigenvector with eigenvalue $1$ (row sums are $1$). Since
+$W$ is doubly stochastic its spectral radius is $1$ (a stochastic
+matrix's eigenvalues lie in the closed unit disc by the
+Gershgorin circle theorem applied to its rows), and irreducibility plus
+the Perron--Frobenius theorem (see Horn \& Johnson~\cite{hornjohnson},
+Ch.~8, or Xiao \& Boyd~\cite{xiaoboydconsensus}) make $1$ a simple
+eigenvalue with every other eigenvalue satisfying $|\lambda|<1$
+whenever $W$ is also aperiodic (guaranteed here by
+positive diagonal entries, $W_{ii}>0$, from the Metropolis--Hastings
+construction). Decomposing $x_0=\bar x\mathbf1+e_0$ with $e_0\perp
+\mathbf1$, $W^kx_0=\bar x\mathbf1+W^ke_0$ and $\|W^ke_0\|_2\le
+\left|\mu_2\right|^k\|e_0\|_2\to0$.
+\end{proof}
+
+\begin{remark}
+Theorem~\ref{thm:doubly-stochastic} is the exact reason this project's
+Metropolis--Hastings weight construction (\S\ref{sec:decomp-theory}) is
+required to be symmetric and doubly stochastic, not merely row-
+stochastic: a row-stochastic-only matrix generally has a LEFT Perron
+eigenvector $\pi\ne\mathbf1/n$, so $W^kx_0\to(\pi^\top x_0)\mathbf1$, the
+$\pi$-weighted average, not the arithmetic mean -- precisely the bug this
+project's own development documents (\S\ref{sec:decomp-theory},
+Table~\ref{tab:bugs}) for both \pkg{decentralized\_\hspace{0pt}opt.py}
+and \pkg{@GFMclass}/\pkg{@ESSclass}'s consensus-dispatch counterpart.
+\end{remark}
+
+\section{Probability theory for Gaussian and quadratic-form random variables}
+\label{sec:prob-prelim}
+
+\begin{theorem}[Affine transformation of a Gaussian vector]
+\label{thm:affine-gaussian}
+If $X\sim\mathcal N(\mu,\Sigma)$ and $Y=AX+b$ for fixed $A\in
+\mathbb{R}^{m\times n}$, $b\in\mathbb{R}^m$, then
+$Y\sim\mathcal{N}(A\mu+b,\,A\Sigma A^\top)$.
+\end{theorem}
+\begin{proof}
+The characteristic function of $X$ is
+$\varphi_X(t)=\exp(it^\top\mu-\tfrac12t^\top\Sigma t)$; that of $Y$ is
+$\varphi_Y(t)=\mathbb E[e^{it^\top(AX+b)}]=e^{it^\top
+b}\varphi_X(A^\top t)=\exp\left(it^\top(A\mu+b)-\tfrac12t^\top
+(A\Sigma A^\top)t\right)$, which is exactly the characteristic function of
+$\mathcal N(A\mu+b,A\Sigma A^\top)$; a distribution is determined by its
+characteristic function (see Casella \& Berger~\cite{casellaberger},
+Thm.~4.6.4, or any graduate probability text).
+\end{proof}
+
+\begin{theorem}[Distribution of a quadratic form in Gaussian residuals]
+\label{thm:chisquare}
+If $r\sim\mathcal N(0,\Sigma_r)$ with $\Sigma_r\succ0$, then
+$J=r^\top\Sigma_r^{-1}r\sim\chi^2_k$ for some $k$ depending on the rank
+structure of $\Sigma_r$; in particular, if $r=z-H\hat x$ is the
+weighted-least-squares residual of an $m$-measurement, $n$-state linear
+model with $\hat x=(H^\top R^{-1}H)^{-1}H^\top R^{-1}z$ and
+$\Sigma_r=R-H(H^\top R^{-1}H)^{-1}H^\top$, then $J\sim\chi^2_{m-n}$.
+\end{theorem}
+\begin{proof}
+Write $\Sigma_r=LL^\top$ (Cholesky); then $L^{-1}r\sim\mathcal
+N(0,I_k)$ (Theorem~\ref{thm:affine-gaussian}) and $J=\|L^{-1}r\|_2^2$ is
+a sum of $k$ independent squared standard normals, the definition of
+$\chi^2_k$. For the WLS residual, $r=(I-H(H^\top
+R^{-1}H)^{-1}H^\top R^{-1})z$ is a linear projection of the Gaussian
+measurement noise onto an $(m-n)$-dimensional subspace orthogonal (in the
+$R^{-1}$ inner product) to $\text{range}(H)$, giving $k=m-n$ degrees of
+freedom; see Abur \& Exposito~\cite{aburexposito}, Ch.~5, for the full
+power-systems-state-estimation derivation.
+\end{proof}
+
+\begin{remark}
+Theorem~\ref{thm:chisquare} is the formal basis for
+\S\ref{sec:fdia-theory}'s chi-square bad-data test and, via
+Theorem~\ref{thm:affine-gaussian} directly, for
+\S\ref{sec:ppf-theory}'s exact analytical probabilistic power flow
+($\Sigma_{\text{flow}}=\text{PTDF}\,\Sigma_{\text{inj}}\,
+\text{PTDF}^\top$ is nothing but Theorem~\ref{thm:affine-gaussian}
+applied to the linear map $\text{flow}=\text{PTDF}\cdot
+\text{injections}$).
+\end{remark}
+
+\section{Discrete-time optimal control}
+\label{sec:control-prelim}
+
+\begin{theorem}[Bellman's principle of optimality and the discrete Riccati recursion]
+\label{thm:riccati}
+For the linear-quadratic regulator problem
+$\min\sum_{k=0}^{N-1}(x_k^\top Qx_k+u_k^\top R_wu_k)+x_N^\top
+P_Nx_N$ s.t.\ $x_{k+1}=A_dx_k+B_du_k$, $Q\succeq0$, $R_w\succ0$, the
+optimal cost-to-go is quadratic, $V_k(x)=x^\top P_kx$, with $P_k$
+generated backward by the discrete Riccati recursion
+\begin{equation}
+P_k = Q + A_d^\top P_{k+1}A_d - A_d^\top P_{k+1}B_d(R_w+B_d^\top
+P_{k+1}B_d)^{-1}B_d^\top P_{k+1}A_d, \qquad P_N \text{ given},
+\label{eq:riccati-recursion}
+\end{equation}
+and the optimal control is the linear state feedback
+$u_k^\star=-K_kx_k$, $K_k=(R_w+B_d^\top P_{k+1}B_d)^{-1}B_d^\top
+P_{k+1}A_d$. If $(A_d,B_d)$ is stabilizable and $(A_d,Q^{1/2})$
+detectable, $P_k\to P_\infty$ as the horizon recedes, where $P_\infty$
+is the unique stabilizing solution of the discrete algebraic Riccati
+equation (DARE), the fixed point of the Riccati recursion above.
+\end{theorem}
+\begin{proof}
+By induction (Bellman's principle of optimality): assume $V_{k+1}(x)=x^\top
+P_{k+1}x$. Then $V_k(x)=\min_u\left[x^\top Qx+u^\top R_wu+(A_dx+B_du)^\top
+P_{k+1}(A_dx+B_du)\right]$ is an unconstrained convex quadratic in $u$
+(since $R_w+B_d^\top P_{k+1}B_d\succ0$); setting its gradient to zero
+gives $u^\star=-K_kx$ with $K_k$ as stated, and substituting back yields
+$V_k(x)=x^\top P_kx$ with $P_k$ following the recursion above --
+closing the induction. Convergence of the backward recursion to the
+DARE's stabilizing fixed point under stabilizability/detectability is a
+classical result; see Anderson \& Moore~\cite{andersonmoore}, Ch.~2, or
+Bertsekas~\cite{bertsekasDP}, Vol.~I, Ch.~4.
+\end{proof}
+
+\begin{remark}
+Theorem~\ref{thm:riccati} is restated here for self-containedness; it
+matches the main course's own Theorem~15 (proved there by the identical
+induction argument) and is the formal basis for
+\S\ref{sec:mpc-theory}'s MPC-converges-to-LQR result.
+\end{remark}
+
+With this toolkit in hand, every later chapter's Theorem/Proof blocks
+either specialize one of the results above or combine two or more of
+them; cross-references back to this chapter are given at each use.
+
+%=============================================================
+\chapter{System Architecture and Data Schema}
+\label{ch:architecture}
+%=============================================================
+
+\section{The schema layer}
+
+Every other extension in this report ultimately reads or writes PSAT's
+own \texttt{.con} device-data format. \pkg{schema/con\_\hspace{0pt}schema.json} was
+built by reading PSAT's own \pkg{@XXclass/XXclass\hspace{0pt}.m} constructors
+directly (never guessed), giving an authoritative column count
+(\texttt{ncol}) for every device, and, for the highest-value devices this
+project's labs use in detail, a traced column-by-column meaning obtained
+by following the device's own \texttt{base.m}/\texttt{Fxcall.m} dynamics
+code. Each entry carries an explicit confidence level:
+
+\begin{itemize}
+\item \textbf{verified} -- traced through source \emph{and}
+  cross-checked against a known real value (e.g.\ the WSCC-9 case's
+  \texttt{Syn.con} column 18 gives $H=23.64$\,s, the published textbook
+  inertia constant). Covers \texttt{Bus}, \texttt{Line}, \texttt{Syn},
+  \texttt{Exc}, \texttt{Tg} in full.
+\item \textbf{data\_consistent} -- \texttt{ncol}/position confirmed from
+  source; meaning inferred from position and plausible data, not traced
+  through the differential-equation code. Covers \texttt{SW}, \texttt{PV},
+  \texttt{PQ}, \texttt{Shunt}, \texttt{Fault}, \texttt{Breaker},
+  \texttt{Supply}, \texttt{Demand}.
+\item \textbf{unconfirmed} -- \texttt{ncol} authoritative; column meaning
+  not resolved. Covers roughly twenty lower-priority devices (FACTS,
+  HVDC, wind/DFIG, PSS, load-modelling variants).
+\end{itemize}
+
+\section{The Python I/O layer: \pkg{psat\_\hspace{0pt}io.py}}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.52\textwidth]{Images/flowchart_psat_io.png}
+\caption{Process flow of \pkg{psat\_io.py}.}
+\end{figure}
+
+\pkg{psat\_\hspace{0pt}io.py} reads a PSAT \texttt{.m} data file into named-column
+\pkg{pandas} \texttt{DataFrame}s using the schema above, tested against
+three real bundled files, including a re-verification of the WSCC-9
+$H=23.64$\,s cross-check.
+
+\section{The structured-results layer: \pkg{psat\_\hspace{0pt}results.m}}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.46\textwidth]{Images/flowchart_psat_results.png}
+\caption{Process flow of \pkg{psat\_results.m}.}
+\end{figure}
+
+\pkg{psat\_\hspace{0pt}results.m} collects PSAT's scattered post-run globals
+(\texttt{Bus}, \texttt{Line}, \texttt{DAE}, \texttt{Syn}, \texttt{Varout},
+\texttt{Settings}) into one struct. Two real bugs were found and fixed
+while building it (full detail in Table~\ref{tab:bugs}): \texttt{DAE.y}
+orders angles \emph{before} voltage magnitudes, the opposite of a first
+draft's assumption, caught by checking that \texttt{DAE.y(10)} equalled
+bus 1's known slack voltage of 1.04\,pu; and PSAT device objects are
+old-style class instances, so \texttt{isfield(Syn,'con')} silently
+returns \texttt{false} even when populated -- fixed with
+\texttt{isempty(Syn.con)} instead.
+
+\section{Parameter sweeps and physically-modified data files}
+
+\pkg{psat\_\hspace{0pt}write\_\hspace{0pt}modified\_\hspace{0pt}datafile.m} writes a physically modified copy
+of any device field (not only line status) to disk, because -- as
+documented in Table~\ref{tab:bugs} -- editing PSAT's in-memory globals
+and re-calling \texttt{runpsat('pf')} does \emph{not} take effect:
+\texttt{runpsat} re-reads the original file from disk on every call
+(\texttt{clpsat.readfile} defaults to 1). \pkg{psat\_\hspace{0pt}scenario\_\hspace{0pt}sweep.m}
+generalizes this write/reload/collect pattern into a reusable sweep
+driver, verified live on the WSCC-9 case: sweeping bus 6's real-power
+demand from 0.5 to 2.1\,pu produces a clean, monotonically declining
+voltage, $1.0183\to0.9838$\,pu.
+
+\section{N-1 classification and secure ATC}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_psat_n1_secure_atc.png}
+\caption{Process flow of \pkg{psat\_n1\_classify.m} and \pkg{psat\_secure\_atc.m}.}
+\end{figure}
+
+\pkg{psat\_\hspace{0pt}n1\_\hspace{0pt}classify.m} runs N-1 screening and classifies each failure
+as \emph{structural/islanding} (network disconnects, detected via
+MATLAB's own \texttt{graph}/\texttt{conncomp}) versus
+\emph{thermal/voltage} (network stays connected, a limit is exceeded).
+Verified live on WSCC-9: exactly the three generator step-up transformer
+lines (bus $1$--$4$, $2$--$7$, $3$--$9$) are flagged structural, the
+remaining six are safe.
+
+\pkg{psat\_\hspace{0pt}secure\_\hspace{0pt}atc.m} chains \texttt{cpfatc} across the full N-1
+contingency list and returns the secure ATC, $\text{ATC}_{\text{secure}}
+=\min(\text{ATC}_{\text{base}},\,\min_k \text{ATC}_k)$. Verified
+live on \texttt{psat/tests/d\_003\_mdl.m}: base ATC = $989.974$, secure ATC
+= $989.962$ (binding contingency: line 2). A separate, genuine
+\emph{PSAT} bug (not this project's own code) was found and worked
+around rather than silently patched: PSAT's internal N-1 sweep inside
+\texttt{cpfatc} crashes on this MATLAB release once \texttt{Snapshot}
+accumulates more than one element; \pkg{psat\_\hspace{0pt}secure\_\hspace{0pt}atc.m} exploits the
+fact that \texttt{OPF.atc} is already set correctly before that internal
+crash occurs.
+
+\section{Linearization export for control design}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{Images/flowchart_psat_export_ss.png}
+\caption{Process flow of \pkg{psat\_export\_ss.m}.}
+\end{figure}
+
+\pkg{psat\_\hspace{0pt}export\_\hspace{0pt}ss.m} runs \texttt{pf}~$\to$~\texttt{sssa}~$\to$~
+\texttt{fm\_abcd} and writes the resulting linearized $(A,B,C,D)$ to both
+\texttt{.mat} and \texttt{.json}. Verified live on WSCC-9: $A$ is
+$39\times39$, $B$ is $39\times6$ (3 AVR + 3 governor inputs), all
+eigenvalues have non-positive real part. \pkg{psat\_\hspace{0pt}ss\_\hspace{0pt}loader.py} loads
+the JSON export back into Python, completing the MATLAB$\to$Python
+hand-off for \S\ref{ch:control}'s MPC/LQR work; a column-major-vs-row-major
+flattening bug was found and fixed here (Table~\ref{tab:bugs}).
+
+\section{Automated lab-report generation: \pkg{lab\_\hspace{0pt}report\_\hspace{0pt}generator.py}}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{Images/flowchart_lab_report_generator.png}
+\caption{Process flow of \pkg{lab\_report\_generator.py}.}
+\end{figure}
+
+\pkg{lab\_\hspace{0pt}report\_\hspace{0pt}generator.py} assembles a formatted, submittable
+\texttt{.docx} lab report (title block, sections, tables, embedded
+figures) from a run's own results, matching this course's own lab
+``Report Requirements'' structure -- closing the gap left by PSAT's own
+\texttt{pfrep}, which dumps plain text only. Verified two ways: every
+generated document is read back with \pkg{python-docx} to confirm its
+structure, and one test builds a real report embedding a real
+\pkg{visualization.py} network plot, rendered all the way to PDF via
+LibreOffice and visually inspected.
+
+%=============================================================
+\chapter{Deep-Integration Device Classes}
+\label{ch:deviceclasses}
+%=============================================================
+
+Unlike every post-processing wrapper in Chapter~\ref{ch:architecture},
+the two extensions in this chapter are genuine new PSAT \emph{device
+types}, registered into PSAT's own class system so they participate
+directly in \texttt{runpsat('pf')}/\texttt{('td')} exactly as
+\texttt{Syn}/\texttt{Exc}/\texttt{Tg}/\texttt{PQ} do. Each required
+additive edits (new lines only, nothing removed) to nine of PSAT's own
+core dispatch files (\texttt{fm\_var.m}, \texttt{psat.m},
+\texttt{fm\_call.m}, \texttt{fm\_dynidx.m}, \texttt{fm\_base.m},
+\texttt{fm\_ncomp.m}, \texttt{fm\_inilf.m}, \texttt{fm\_restore.m},
+\texttt{comp.ini}); backups of the pre-edit state of every file are kept
+so either addition can be reverted independently.
+
+\section{\pkg{@ESSclass}: a battery/storage device}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.52\textwidth]{Images/flowchart_essclass.png}
+\caption{Process flow of \pkg{@ESSclass}.}
+\end{figure}
+
+PSAT ships with no storage or battery device class of any kind
+(confirmed by scanning every bundled \texttt{@XXclass} directory name and
+\texttt{Contents.m} for ``storage'', ``battery'', ``ess''). \texttt{Ess}
+closes this gap. \texttt{Ess.con} has 10 columns: \texttt{bus, Sn, Vn,
+capacity[MWh], Pmax[pu], SoCmin, SoCmax, SoC0, Pref[pu], status}, with one
+dynamic state per unit, the state of charge $\text{SoC}$ (as a fraction
+of capacity):
+\begin{equation}
+\frac{d\,\text{SoC}}{dt} = -\frac{P_{\text{actual}}\cdot
+S_{\text{mva}}}{\text{capacity}\cdot 3600}
+\label{eq:ess}
+\end{equation}
+where $P_{\text{actual}}$ equals the commanded $P_{\text{ref}}$
+(positive = discharging) unless the unit has saturated at
+$\text{SoC}_{\min}$ or $\text{SoC}_{\max}$, in which case
+$P_{\text{actual}}\to 0$ -- computed once in \texttt{ess\_effective\_
+power.m} and shared by the network-injection equation
+(\texttt{gcall.m}) and the state derivative (\texttt{fcall.m}) so the two
+can never disagree about saturation. Known limitations, stated rather
+than hidden: no reactive-power support ($Q=0$ always); $P_{\text{ref}}$
+is a fixed constant, not a controllable time-varying dispatch signal
+(a natural future extension); no internal resistance or thermal
+derating.
+
+\textbf{Verified live}, end-to-end against real PSAT 2.1.11 sessions,
+with seven genuine bugs found by actually running it, including one
+where the fix produced no errors and a clean exit but had, on direct
+before/after numeric comparison, \emph{zero actual effect} -- caught only
+by comparing numbers, not by trusting a clean run. Full defect log in
+Table~\ref{tab:bugs}.
+
+\section{\pkg{@GFMclass}: a grid-forming inverter (virtual synchronous machine)}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_gfmclass.png}
+\caption{Process flow of \pkg{@GFMclass}.}
+\end{figure}
+
+PSAT has no inverter-control device of any kind -- only the conventional
+synchronous-machine model, \texttt{@SYclass}. \texttt{Gfm.con} has 9
+columns: \texttt{bus, Sn, Vn, Hv[s], Dv[pu], Xv[pu], E[pu], Pref[pu],
+status}, with two dynamic states per unit, virtual rotor angle
+$\delta$ and virtual speed deviation $\omega$ (nominal 1\,pu), governed by
+exactly the classical swing equation:
+\begin{gather}
+\frac{d\delta}{dt} = \text{rad}\cdot(\omega-1), \qquad \text{rad}=2\pi f_{\text{nominal}} \label{eq:gfm1}\\
+\frac{d\omega}{dt} = \frac{P_{\text{ref}} - P_e - D_v(\omega-1)}{2H_v} \label{eq:gfm2}\\
+P_e = \frac{EV}{X_v}\sin(\delta-\theta) \label{eq:gfm3}
+\end{gather}
+with $P_e$ (the electrical-power equation above) computed once in \texttt{gfm\_power.m} and
+shared by \texttt{gcall}/\texttt{fcall}/\texttt{Gycall}/\texttt{Fxcall},
+so all four always agree. The mismatch $P_{\text{ref}}-P_e$ excites the
+swing dynamics -- the defining structural feature of a grid-\emph{forming}
+(rather than grid-\emph{following}) inverter: its output is determined by
+network conditions relative to its own internal state, not pinned to
+$P_{\text{ref}}$ at every instant. This device also gives the main
+course's Theorem 21 (``a virtual synchronous machine's closed-loop
+frequency dynamics obey exactly the swing equation under substitution of
+virtual for physical parameters'') a real PSAT implementation, not only a
+standalone closed-form treatment.
+
+\begin{theorem}[VSM small-signal dynamics and stability threshold, single-machine-infinite-bus case]
+\label{thm:vsm}
+Linearize the governing equations above about an equilibrium
+$(\delta^\star,\omega=1)$ with the bus angle $\theta$ held fixed (the
+single-machine-infinite-bus idealization), writing
+$\Delta\delta=\delta-\delta^\star$, $\Delta\omega=\omega-1$. Then
+\begin{equation}
+\begin{bmatrix}\Delta\dot\delta\\\Delta\dot\omega\end{bmatrix}
+= \underbrace{\begin{bmatrix}0 & \text{rad}\\ -\dfrac{K_v}{2H_v} & -\dfrac{D_v}{2H_v}\end{bmatrix}}_{A_{\text{vsm}}}
+\begin{bmatrix}\Delta\delta\\\Delta\omega\end{bmatrix}, \qquad
+K_v \;\triangleq\; \frac{EV}{X_v}\cos(\delta^\star-\theta),
+\label{eq:vsm-linear}
+\end{equation}
+is \emph{algebraically identical} (same $2\times2$ block structure, same
+roles for $H,D$, and the same synchronizing-coefficient definition
+$K=\partial P_e/\partial\delta$ evaluated at $\delta^\star$) to the linearized
+classical single-machine swing equation with physical inertia $H$ and
+damping $D$ substituted by $H_v,D_v$. Consequently $A_{\text{vsm}}$'s
+characteristic polynomial is
+$2H_v\lambda^2+D_v\,\text{rad}^{-1}\lambda\cdot\text{rad}+K_v\,\text{rad}=0$,
+i.e.\ (absorbing $\text{rad}$ into a time rescaling, the standard
+per-unit-radian swing-equation convention)
+$2H_v\lambda^2+D_v\lambda+K_v=0$, with roots
+\begin{equation}
+\lambda_{1,2} = \frac{-D_v\pm\sqrt{D_v^2-8H_vK_v}}{4H_v}.
+\label{eq:vsm-eigs}
+\end{equation}
+The equilibrium is locally asymptotically stable if and only if
+$D_v>0$ and $K_v>0$ (Routh--Hurwitz necessary and sufficient conditions
+for a second-order real polynomial); since $K_v$ changes sign exactly
+when $\delta^\star-\theta$ crosses $90^\circ$, stability is lost
+\emph{discontinuously} at that angle, not gradually.
+\end{theorem}
+\begin{proof}
+Differentiate the governing swing equations above and evaluate the
+Jacobian at $(\delta^\star,1)$: $\partial(\Delta\dot\delta)/
+\partial\Delta\delta=0$, $\partial(\Delta\dot\delta)/\partial\Delta
+\omega=\text{rad}$ directly from the angle equation; from the speed
+and power equations, $\partial(\Delta\dot\omega)/
+\partial\Delta\delta=-\tfrac1{2H_v}\partial P_e/\partial\delta=
+-K_v/(2H_v)$ and $\partial(\Delta\dot\omega)/\partial\Delta\omega=
+-D_v/(2H_v)$, giving the linearized state matrix above. The characteristic
+polynomial of a companion-form $2\times2$ matrix
+$\begin{bmatrix}0&a\\b&c\end{bmatrix}$ is $\lambda^2-c\lambda-ab=0$;
+substituting $a=\text{rad}$, $b=-K_v/(2H_v)$, $c=-D_v/(2H_v)$ and
+rescaling time by $\text{rad}$ (equivalent to measuring $\lambda$ in
+electrical radians/s instead of per-unit speed units, the standard swing-
+equation normalization -- see Kundur~\cite{kundur}, Ch.~11, or Machowski,
+Bialek \& Bumby~\cite{machowski}, Ch.~5) yields the eigenvalue formula
+above. Both roots have negative real part iff the
+polynomial's two coefficients $D_v,K_v$ (with leading coefficient
+$2H_v>0$) are both positive -- the elementary 2-term Routh array test
+for a quadratic, equivalent to Vieta's formulas giving
+$\lambda_1\lambda_2=K_v/(2H_v)>0$ and $\lambda_1+\lambda_2=-D_v/(2H_v)<0$
+simultaneously forcing both roots into the open left half-plane.
+\end{proof}
+
+\begin{corollary}[Pinned decay rate under uniform parameterization]
+\label{cor:pinned-decay}
+If $D_v^2<8H_vK_v$ (the underdamped case), the eigenvalue formula above gives a
+complex-conjugate pair with real part exactly $-D_v/(4H_v)$,
+\emph{independent of $K_v$'s magnitude} -- only the oscillation
+frequency (the imaginary part) depends on $K_v$. This is the closed-form
+origin of this report's \S\ref{sec:stability-opf-theory} empirical
+finding that a uniformly $H$/$D$-parameterized multi-machine system's
+dominant eigenvalue real part stays pinned at $-D/(4H)$ for every stable
+configuration.
+\end{corollary}
+
+\textbf{Verified live}; building it caused a real small-signal
+instability to be discovered (eigenvalue check
+$\text{eig}(\text{DAE.Fx}-\text{DAE.Fy}(\text{DAE.Gy}\backslash
+\text{DAE.Gx}))$ showing a genuinely unstable mode at $+25.9$), traced
+to a sign-convention error in how generation is injected into PSAT's own
+power-balance equation -- and the same, previously undetected bug was
+then found and fixed in the already-shipped \texttt{@ESSclass} too. Full
+detail in Table~\ref{tab:bugs}.
+
+%=============================================================
+\chapter{Distribution, Fault, and Multi-Energy Network Analysis}
+\label{ch:distribution}
+%=============================================================
+
+\section{Three-phase unbalanced distribution power flow}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_three_phase_distribution.png}
+\caption{Process flow of \pkg{three\_phase\_distribution.py}.}
+\end{figure}
+
+PSAT is a positive-sequence-only transmission tool;
+\pkg{three\_\hspace{0pt}phase\_\hspace{0pt}distribution\hspace{0pt}.py}
+fills the unbalanced-distribution gap via the standard
+forward--backward sweep (FBS) method on a radial feeder, each line
+segment described by a $3\times3$ phase impedance matrix $Z_{\text{line}}$
+(allowing mutual phase coupling, which a positive-sequence model cannot
+represent at all):
+\begin{gather}
+\text{backward:} \quad  I_{\text{line}} = \textstyle\sum_{\downarrow\text{loads}} I_{\text{load}}(V) + \sum_{\downarrow\text{lines}} I_{\text{line}} \\
+\text{forward:} \quad  V_{\text{to}} = V_{\text{from}} - Z_{\text{line}}\,I_{\text{line}}
+\end{gather}
+(sums taken over the loads and line segments electrically downstream of
+the current bus)
+iterated to convergence. Verified against the published IEEE 4-bus test
+feeder (balanced-load variant, giving an independent cross-check against
+PYPOWER on the same topology) and a hand-computable 2-bus unbalanced
+case. A real, consequential bug (Table~\ref{tab:bugs}) was found in the
+MATLAB port: \texttt{'} is MATLAB's \emph{conjugate} transpose for a
+complex array, silently producing a fully converged but wrong
+phase-B/phase-C-swapped answer.
+
+\begin{proposition}[FBS as a fixed-point iteration]
+\label{prop:fbs}
+Write one backward--forward sweep as $V^{(k+1)}=T(V^{(k)})$, where $T$
+composes the backward current calculation $I_{\text{line}}(V)$
+(constant-power loads give $I_{\text{load},\phi}=
+(S_\phi/V_\phi)^{\star}$, a function of $V$) with the forward voltage
+update $V_{\text{to}}=V_{\text{from}}-Z_{\text{line}}I_{\text{line}}$. If, on a neighborhood $\mathcal{V}$ of the true solution
+$V^\star$, $T$ is Lipschitz with constant $\gamma<1$ in $V$ (a
+sufficient condition is that the per-unit voltage drop across every
+line segment, $\|Z_{\text{line}}I_{\text{line}}\|/\|V\|$, stays
+small enough that the constant-power load's current-vs-voltage
+sensitivity does not dominate the line-drop sensitivity --
+quantitatively, $\gamma\approx\max_\phi\left|Z_{\text{line}}S_\phi/
+V_\phi^2\right|$, the standard FBS convergence-radius estimate; see Kersting,
+\emph{Distribution System Modeling and Analysis}~\cite{kersting},
+Ch.~10, and Cheng \& Shirmohammadi~\cite{chengshirmohammadi}), then by
+Theorem~\ref{thm:banach} the FBS iteration converges to the unique fixed
+point $V^\star\in\mathcal V$ geometrically. Lightly loaded radial
+feeders (the regime every IEEE test feeder and this module's own test
+cases operate in) satisfy this condition comfortably; heavily loaded or
+very long feeders can violate it, the standard practical failure mode of
+plain FBS reported throughout the distribution-analysis literature.
+\end{proposition}
+
+\section{Short-circuit fault analysis}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_short_circuit.png}
+\caption{Process flow of \pkg{short\_circuit.py}.}
+\end{figure}
+
+\pkg{short\_\hspace{0pt}circuit.py} computes symmetrical (three-phase) and
+unsymmetrical (SLG, LL, DLG) fault currents via the $Z_{\text{bus}}$
+method and symmetrical components, the standard protection-and-
+coordination calculation PSAT's own \texttt{Fault.con} (a pure
+time-domain disturbance device) cannot perform:
+\begin{gather}
+I_f^{3\phi} = \frac{E_a}{Z_{1,kk}+Z_f} \\
+I_f^{\text{SLG}} = \frac{3E_a}{Z_{0,kk}+Z_{1,kk}+Z_{2,kk}+3Z_f} \\
+I_f^{\text{LL}} = \frac{E_a}{Z_{1,kk}+Z_{2,kk}+Z_f}
+\end{gather}
+with the DLG case solved via the standard parallel $Z_1/Z_2/Z_0$
+combination. Verified against PYPOWER's \texttt{case9} positive-sequence
+$Y_{\text{bus}}$ and a closed-form single-generator infinite-bus
+calculation. The MATLAB port (\pkg{psat\_\hspace{0pt}short\_\hspace{0pt}circuit.m}) was
+cross-validated against an independent Python run reading the identical
+PSAT file, matching $Z_{kk}=0.0007+j0.0514$, $\left|I_f\right|=19.4644$\,pu in both
+languages to the digit.
+
+\begin{theorem}[Fault current from the Thevenin/superposition argument]
+\label{thm:zbus-fault}
+For a bolted three-phase fault at bus $k$ of a linear network with
+pre-fault internal EMF $E_a$ behind positive-sequence bus impedance
+matrix $Z_1=Y_{\text{bus},1}^{-1}$, the fault current is
+$I_f^{3\phi}=E_a/(Z_{1,kk}+Z_f)$, and the fault-induced voltage change
+at any bus $m$ is $\Delta V_m=-Z_{1,mk}I_f^{3\phi}$.
+\end{theorem}
+\begin{proof}
+By superposition, the faulted network's response equals the pre-fault
+response plus the response to a single current source of value
+$-I_f^{3\phi}$ injected at bus $k$ alone (Thevenin's theorem applied at
+bus $k$: the fault is modeled as closing a switch to a fault impedance
+$Z_f$, equivalent to injecting the current that switch carries while
+every other source is deactivated for the purposes of computing the
+\emph{change} in network state). The bus-impedance matrix $Z_1=
+Y_{\text{bus},1}^{-1}$ exists because $Y_{\text{bus},1}$ is the
+network's own admittance Laplacian plus shunt generator admittances --
+nonsingular whenever at least one generator is connected, by the same
+argument as Theorem~\ref{thm:laplacian} applied to the augmented
+(grounded) network. The change in bus $m$'s voltage due to a unit
+current injected at bus $k$ alone is, by definition of the inverse,
+exactly column $k$ of $Z_1$, i.e.\ $\Delta V_m=-Z_{1,mk}I_f^{3\phi}$ for
+an injected current of $-I_f^{3\phi}$. At the fault bus itself, the
+boundary condition $V_k=Z_fI_f^{3\phi}$ (Ohm's law through the fault
+impedance) combined with $V_k=E_a-Z_{1,kk}I_f^{3\phi}$ (pre-fault voltage
+minus the self-impedance drop) gives $E_a-Z_{1,kk}I_f^{3\phi}=
+Z_fI_f^{3\phi}$, solved directly for $I_f^{3\phi}=E_a/(Z_{1,kk}+Z_f)$.
+The unsymmetrical-fault formulas follow the identical argument applied
+in the decoupled positive/negative/zero-sequence networks, connected at
+the fault point according to the fault type's own boundary conditions
+(Fortescue's symmetrical-component transformation block-diagonalizes a
+balanced three-phase network into three independent single-phase
+sequence networks); see Glover, Overbye \&
+Sarma~\cite{glover}, Ch.~9--10, or Grainger \&
+Stevenson~\cite{graingerstevenson}, Ch.~11--12, for the full derivation
+of each fault type's sequence-network interconnection.
+\end{proof}
+
+\section{Gas-pipeline networks: the Weymouth equation}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_gas_network.png}
+\caption{Process flow of \pkg{gas\_network.py}.}
+\end{figure}
+
+\pkg{gas\_\hspace{0pt}network.py} deliberately mirrors the structure of this course's
+own Newton--Raphson power-flow treatment, substituting pressure for
+voltage. For a pipe $(i,j)$ with Weymouth constant $K_{ij}>0$:
+\begin{equation}
+q_{ij} = \text{sign}(p_i^2-p_j^2)\sqrt{K_{ij}\left|p_i^2-p_j^2\right|}
+\label{eq:weymouth}
+\end{equation}
+exactly analogous to DC power flow's $P_{ij}=B_{ij}(\theta_i-\theta_j)$,
+except nonlinear in pressure (gas is compressible) rather than linear in
+angle. Nodal balance at every non-reference node,
+$\text{supply}_i-\text{demand}_i-\sum_j q_{ij}=0$, is solved by
+Newton--Raphson on the unknown pressures directly (not pressure-squared,
+to keep positivity visible during iteration) with a finite-difference
+Jacobian, cross-validated against \texttt{scipy.optimize.fsolve} on every
+test case. The MATLAB port reproduces the Python/\texttt{fsolve}-
+cross-validated 3-node result ($C=60.18$, $D=50.29$) to 2 decimal places,
+after a real bug (nested MATLAB functions closing over outer data
+silently returning \texttt{NaN}) was found and fixed by switching to
+ordinary local functions with explicit arguments.
+
+\begin{theorem}[Local quadratic convergence of Newton--Raphson]
+\label{thm:newton}
+Let $F:\mathbb{R}^n\to\mathbb{R}^n$ be continuously differentiable with
+Jacobian $J(x)$ Lipschitz continuous with constant $L$ near a solution
+$x^\star$ ($F(x^\star)=0$), and suppose $J(x^\star)$ is nonsingular. The
+Newton iteration $x_{k+1}=x_k-J(x_k)^{-1}F(x_k)$ converges
+\emph{quadratically} for any $x_0$ sufficiently close to $x^\star$:
+$\|x_{k+1}-x^\star\|\le c\|x_k-x^\star\|^2$ for a constant $c$ depending
+on $L$ and $\|J(x^\star)^{-1}\|$.
+\end{theorem}
+\begin{proof}
+By Taylor's theorem with integral remainder,
+$0=F(x^\star)=F(x_k)+J(x_k)(x^\star-x_k)+r_k$ with
+$\|r_k\|\le\tfrac{L}{2}\|x^\star-x_k\|^2$ (the standard Lipschitz-
+Jacobian remainder bound). Rearranging,
+$x^\star-x_k+J(x_k)^{-1}F(x_k)=-J(x_k)^{-1}r_k$, i.e.\
+$x_{k+1}-x^\star=J(x_k)^{-1}r_k$, so $\|x_{k+1}-x^\star\|\le
+\|J(x_k)^{-1}\|\cdot\tfrac{L}{2}\|x_k-x^\star\|^2$. Continuity of
+$J(\cdot)^{-1}$ near $x^\star$ (from $J(x^\star)$ nonsingular) bounds
+$\|J(x_k)^{-1}\|$ by a constant on a small enough neighborhood, giving
+the stated quadratic bound; see Nocedal \&
+Wright~\cite{nocedalwright}, Thm.~11.2, or Ortega \& Rheinboldt. This is
+restated here from the main course's own identical Theorem~2 (there
+proved for the AC power-flow mismatch function) because
+\pkg{gas\_\hspace{0pt}network.py} solves the structurally analogous nodal-balance
+root-finding problem $F(p)=\text{supply}-\text{demand}-\sum q(p)=0$ on
+the unknown nodal pressures, with the finite-difference Jacobian
+approximating $J(p)$ to the accuracy needed for this theorem's
+hypotheses to hold in the discretized implementation.
+\end{proof}
+
+\begin{remark}
+Unlike the DC power-flow map (linear, Theorem~\ref{thm:laplacian}
+guarantees a unique solution unconditionally once the reference node is
+fixed), the Weymouth nodal-balance system is
+genuinely nonlinear in pressure, so this report does not claim a
+global existence/uniqueness theorem for it -- only the local
+convergence guarantee of Theorem~\ref{thm:newton} once Newton's method
+is already close to a solution, consistent with every test case in this
+module being cross-validated against \texttt{scipy.optimize.fsolve}
+from a physically reasonable flat start (uniform nominal pressure)
+rather than an arbitrary one.
+\end{remark}
+
+\section{Network visualization}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.46\textwidth]{Images/flowchart_visualization.png}
+\caption{Process flow of \pkg{visualization.py}.}
+\end{figure}
+
+\pkg{visualization\hspace{0pt}.py} draws schematic network diagrams (via
+\texttt{networkx} layout, since PSAT data files carry no bus
+coordinates) with optional voltage-magnitude node coloring and
+line-loading edge coloring, verified against the WSCC-9 structural-failure
+lines Chapter~\ref{ch:architecture}'s N-1 classifier already confirmed
+live. The MATLAB port, \pkg{psat\_\hspace{0pt}visualize.m}, plots PSAT's own
+currently-loaded network directly (never a separately re-typed topology).
+
+%=============================================================
+\chapter{Optimization and Economic Dispatch Extensions}
+\label{ch:optimization}
+%=============================================================
+
+PSAT's \texttt{opf} is a single, centralized, deterministic solve. This
+chapter's extensions add distributed optimization, uncertainty (both
+stochastic and robust), storage dispatch, market economics, multi-period
+scheduling, and dynamic-stability-constrained dispatch -- none of which
+PSAT has any native capability for.
+
+\section{Distributed optimization: dual decomposition, ADMM, and consensus}
+\label{sec:decomp-theory}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_decentralized_opt.png}
+\caption{Process flow of \pkg{decentralized\_opt.py}.}
+\end{figure}
+
+\pkg{decentralized\_\hspace{0pt}opt.py} implements three structurally distinct
+distributed-dispatch algorithms, each benchmarked against the closed-form
+centralized equal-incremental-cost optimum,
+\begin{equation}
+\lambda^\star = \frac{d+\sum_i b_i/(2a_i)}{\sum_i 1/(2a_i)}, \qquad
+P_i^\star = \frac{\lambda^\star-b_i}{2a_i}.
+\label{eq:centralized-ed}
+\end{equation}
+
+\textbf{Dual decomposition} (separable sum-coupling constraint
+$\sum_i P_i=d$): each generator independently minimizes its own cost
+minus $\lambda P_i$; the scalar price updates by subgradient ascent,
+\begin{equation}
+\lambda^{(k+1)} = \lambda^{(k)} + \alpha\left(d-\textstyle\sum_i P_i^{(k)}\right),
+\qquad \alpha = \left(\textstyle\sum_i \tfrac{1}{2a_i}\right)^{-1}.
+\label{eq:dual-decomp}
+\end{equation}
+Verified on a 2-generator test system ($a=[0.04,0.05]$, $b=[9.6,11.2]$,
+$d=400$): both the closed-form and the iterative solver converge to
+$P=[231.11,168.89]$, $\lambda=28.0889$, in 3 iterations.
+
+\textbf{ADMM consensus on a shared variable} (the tie-line flow
+$P_{\text{tie}}$, which dual decomposition cannot handle because there
+is no separable sum-coupling constraint -- both areas must agree on the
+\emph{same} value): each area solves a locally penalized sub-problem,
+\begin{equation}
+t_a \leftarrow \arg\min_{t\in[-\bar t,\bar t]}\; \text{cost}_a\left(d_a+t\right) + \tfrac{\rho}{2}(t-(z-u_a))^2,
+\label{eq:admm}
+\end{equation}
+followed by the standard two-block ADMM update
+$z\leftarrow\tfrac12(t_a+t_b)$, $u_a\leftarrow u_a+(t_a-z)$,
+$u_b\leftarrow u_b+(t_b-z)$. Verified on a 2-area test system: converges
+to $P_{\text{tie}}=61.1111$, $P_a=211.1111$, $P_b=188.8889$.
+
+\textbf{Metropolis--Hastings consensus dispatch} (fully decentralized,
+no coordinator, neighbor-to-neighbor communication over an adjacency
+graph), using symmetric doubly-stochastic weights
+$W_{ij}=1/(1+\max(\deg_i,\deg_j))$ for $i\ne j$, $W_{ii}=1-\sum_{j\ne i}W_{ij}$
+-- required to be symmetric because a row-stochastic-only matrix was
+found, in this project's own development, to converge to the wrong,
+degree-weighted fixed point rather than the true consensus average.
+
+\begin{theorem}[Strong duality and subgradient convergence for separable economic dispatch]
+\label{thm:dual-decomp}
+The quadratic economic-dispatch problem $\min_P\sum_ia_iP_i^2+b_iP_i$
+s.t.\ $\sum_iP_i=d$, $P_i\ge0$ is convex with an affine equality
+constraint, so Slater's condition (Assumption~\ref{as:slater}) holds
+trivially (any feasible point is already ``strict'' for a problem with
+no inequality constraints beyond box bounds met with slack) and
+Theorem~\ref{thm:strong-duality} applies: strong duality holds and the
+KKT stationarity condition $2a_iP_i+b_i-\lambda=0$ (for $P_i$ in the
+interior of its bound) gives exactly the closed form stated above
+for the centralized optimum, with $\lambda^\star$ the shared dual price.
+Moreover, the subgradient iteration given above converges to
+$\lambda^\star$ at the sublinear rate $O(1/\sqrt{k})$ for a general
+convex dual function and \emph{geometrically} here, because the dual
+function $d(\lambda)=\sum_i\min_{P_i\ge0}(a_iP_i^2+b_iP_i-\lambda
+P_i)+\lambda d$ is itself twice differentiable and strongly
+concave in $\lambda$ with curvature $-\sum_i\tfrac1{2a_i}$ on the
+unconstrained-$P_i$ region, making that same subgradient iteration exactly
+Newton's method on $d(\lambda)$ with the problem's own curvature as the
+step size -- the formal reason the module converges to machine precision
+in exactly 3 iterations on its 2-generator reference case rather than the
+many iterations a generic (curvature-oblivious) subgradient step would
+need. See Bertsekas~\cite{bertsekasnlp}, \S6.1, or Boyd \&
+Vandenberghe~\cite{boydconvex}, \S5.5.3, for the general dual-
+decomposition convergence theory.
+\end{theorem}
+
+\begin{theorem}[ADMM convergence]
+\label{thm:admm}
+For $\min_{x,z}f(x)+g(z)$ s.t.\ $Ax+Bz=c$ with $f,g$ closed, proper,
+convex, the ADMM iterates
+$x^{k+1}=\arg\min_xf(x)+\tfrac\rho2\|Ax+Bz^k-c+u^k\|_2^2$,
+$z^{k+1}=\arg\min_zg(z)+\tfrac\rho2\|Ax^{k+1}+Bz-c+u^k\|_2^2$,
+$u^{k+1}=u^k+Ax^{k+1}+Bz^{k+1}-c$ satisfy $f(x^k)+g(z^k)\to p^\star$
+(the optimal value) and the primal residual $Ax^k+Bz^k-c\to0$, for any
+$\rho>0$, provided a saddle point of the unaugmented Lagrangian exists.
+\end{theorem}
+\begin{proof}[Proof sketch]
+Boyd, Parikh, Chu, Peleato \& Eckstein~\cite{boyd}, \S3.2, prove this
+via a Lyapunov-function argument: $V^k=\tfrac1\rho\|u^k-u^\star\|_2^2+
+\rho\|B(z^k-z^\star)\|_2^2$ is shown to be non-increasing along the
+ADMM iterates (using convexity of $f,g$ and the optimality conditions at
+a saddle point $(x^\star,z^\star,u^\star)$), and the decrease
+$V^k-V^{k+1}$ dominates the sum of squared primal and dual residual
+norms, which therefore must vanish; convergence of the objective then
+follows from convexity and the residuals vanishing. Applied to
+the ADMM local update given above with $x=(t_a,P_a)$, $z=(t_b,P_b)$, $A$/$B$ encoding the
+consensus constraint $t_a=t_b$: this is exactly the two-block ADMM
+pattern, so Theorem~\ref{thm:admm} guarantees the module's observed
+convergence to the shared tie flow $P_{\text{tie}}=61.1111$ is not
+coincidental -- it is the generic behavior ADMM theory predicts for
+\emph{any} convex two-area split of this problem, for any $\rho>0$
+(though the convergence \emph{rate} does depend on $\rho$, which is why
+this project's own earlier work needed to move from a coarse grid search
+to a proper bounded 1-D solver for the ADMM inner problem --
+Table~\ref{tab:bugs} -- to realize the rate the theorem's hypotheses
+actually promise).
+\end{proof}
+
+\begin{corollary}[Metropolis--Hastings consensus dispatch converges to the true average]
+\label{cor:mh-dispatch}
+The weight matrix $W$ defined above is symmetric by construction
+($W_{ij}=W_{ji}$) and doubly stochastic (row sums
+$\sum_{j\ne i}W_{ij}+W_{ii}=1$ by construction, and column sums equal row
+sums by symmetry), and irreducible whenever the communication graph is
+connected. Theorem~\ref{thm:doubly-stochastic} therefore guarantees each
+agent's local price estimate $\lambda_i^{(k)}$ converges geometrically to
+the true network-wide average price, \emph{not} a degree-weighted
+average -- the exact property a naive row-stochastic-only $W$ lacks, and
+the root cause of the bug this project's own Week~12 development and
+this module's own first draft both independently hit (Table~\ref{tab:bugs}).
+\end{corollary}
+
+\section{Stochastic and robust dispatch under uncertainty}
+\label{sec:chance-theory}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.52\textwidth]{Images/flowchart_stochastic_opf.png}
+\caption{Process flow of \pkg{stochastic\_opf.py}.}
+\end{figure}
+
+\textbf{Two-stage stochastic recourse} (\pkg{stochastic\_\hspace{0pt}opf.py}):
+first-stage (here-and-now) commitment, second-stage (wait-and-see)
+recourse per scenario $s$ with probability $\pi_s$:
+\begin{equation}
+\min_{x}\; c^\top x + \sum_s \pi_s\, Q_s(x), \qquad
+Q_s(x)=\min_{y_s\ge0}\; q^\top y_s \;\; \text{s.t. recourse feasibility}.
+\end{equation}
+Verified to reproduce Value of the Stochastic Solution
+$\text{VSS}=\$138.0$ on this project's reference scenario, and
+cross-checked against brute-force enumeration over a discretized
+first-stage grid.
+
+\begin{theorem}[Ordering of the stochastic-programming bounds, and $\text{VSS}\ge0$]
+\label{thm:vss}
+Define the recourse problem value
+$\text{RP}=\min_x c^\top x+\mathbb E_\xi[Q(x,\xi)]$, the wait-and-see
+value $\text{WS}=\mathbb E_\xi[\min_x c^\top x+Q(x,\xi)]$, the
+expected-value solution $\bar x=\arg\min_x c^\top x+Q(x,\mathbb
+E[\xi])$, and $\text{EEV}=c^\top\bar x+\mathbb E_\xi[Q(\bar x,\xi)]$
+(the true expected cost of deploying the EV-problem's solution under
+the real uncertainty). If $Q(x,\cdot)$ is convex in $\xi$ for each fixed
+$x$ (true whenever $Q$ is itself the value function of a convex
+recourse LP/QP, as it is here), then
+\begin{equation}
+\text{WS}\;\le\;\text{RP}\;\le\;\text{EEV}, \qquad
+\text{VSS}\triangleq\text{EEV}-\text{RP}\;\ge\;0.
+\label{eq:vss-chain}
+\end{equation}
+\end{theorem}
+\begin{proof}
+$\text{RP}\le\text{EEV}$ immediately: $\text{RP}$ minimizes over
+\emph{all} $x$ while $\text{EEV}$ evaluates the (generally suboptimal)
+fixed choice $\bar x$, so $\text{RP}=\min_xc^\top x+\mathbb
+E_\xi[Q(x,\xi)]\le c^\top\bar x+\mathbb E_\xi[Q(\bar x,\xi)]=
+\text{EEV}$. For $\text{WS}\le\text{RP}$: for every fixed $\xi$,
+$\min_xc^\top x+Q(x,\xi)\le c^\top x+Q(x,\xi)$ for the particular $x$
+that minimizes the expectation, so taking expectations of the
+left-hand side's pointwise minimum can only decrease the value relative
+to fixing one $x$ across all $\xi$ -- formally, $\mathbb
+E_\xi\left[\min_xc^\top x+Q(x,\xi)\right]\le\min_x\mathbb E_\xi\left[c^\top
+x+Q(x,\xi)\right]$ because the expectation of a pointwise minimum never
+exceeds the minimum of the expectation (interchanging $\min$ and
+$\mathbb E$ can only help the wait-and-see planner, who chooses $x$
+\emph{after} seeing $\xi$). See Birge \&
+Louveaux~\cite{birgelouveaux}, \S1.2--1.3, for the complete
+derivation and the role of convexity. The module's own verified
+$\text{VSS}=\$138.0>0$ on its reference scenario is therefore not a
+numerical coincidence but a guaranteed structural property of any
+convex two-stage recourse problem with genuinely scenario-dependent
+recourse costs.
+\end{proof}
+
+\textbf{Gaussian chance-constrained reserve sizing}: the smallest reserve
+$R^\star$ such that $\Pr(\text{shortfall}>R)\le\epsilon$ under a Gaussian
+forecast-error model is
+\begin{equation}
+R^\star = \sigma\,\Phi^{-1}(1-\epsilon),
+\label{eq:chance}
+\end{equation}
+reproducing $R_{90}=2.957$, $R_{95}=3.795$, $R_{99}=5.368$\,MW at
+$\sigma=2.3074$\,MW.
+
+\begin{theorem}[The Gaussian quantile reserve is the tightest valid reserve]
+\label{thm:chance-tight}
+Let shortfall $\sim\mathcal N(0,\sigma^2)$. Among all $R\ge0$ satisfying
+$\Pr(\text{shortfall}>R)\le\epsilon$, $R^\star=\sigma\Phi^{-1}(1-\epsilon)$
+is the smallest.
+\end{theorem}
+\begin{proof}
+$\Pr(\text{shortfall}>R)=1-\Phi(R/\sigma)$ is a strictly decreasing,
+continuous function of $R$ (since $\Phi$ is a strictly increasing CDF
+with a everywhere-positive Gaussian density). The constraint
+$1-\Phi(R/\sigma)\le\epsilon$ is therefore equivalent to
+$R\ge\sigma\Phi^{-1}(1-\epsilon)$ (applying the strictly increasing
+function $\Phi^{-1}$ to both sides of $\Phi(R/\sigma)\ge1-\epsilon$),
+and the smallest $R$ satisfying a $\ge$ constraint is attained with
+equality, $R^\star=\sigma\Phi^{-1}(1-\epsilon)$. Strict monotonicity
+(not just monotonicity) is what rules out a smaller $R$ also
+satisfying the constraint, and is exactly the property a non-Gaussian,
+possibly non-strictly-monotonic error CDF can lack, which is why the
+main course's own Theorem~13 (and this report's
+\S\ref{ch:limitations}) flags the Gaussian assumption explicitly as a
+modeling choice, not a universal law.
+\end{proof}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_robust_opf.png}
+\caption{Process flow of \pkg{robust\_opf.py}.}
+\end{figure}
+
+\begin{theorem}[Bertsimas--Sim robust counterpart]
+\label{thm:bertsimas-sim}
+Consider an uncertain linear constraint $\sum_ia_ix_i\le b$ where each
+coefficient $a_i=\bar a_i+\xi_i\hat a_i$ may deviate from its nominal
+value $\bar a_i$ by up to $\hat a_i\ge0$, with $\xi_i\in[-1,1]$, and at
+most $\Gamma\in[0,n]$ of the $n$ uncertain coefficients are allowed to
+simultaneously reach their bound (the ``budget of uncertainty''). The
+robust requirement ``the constraint holds for every realization
+consistent with the budget'' is equivalent to the single deterministic
+constraint
+\begin{equation}
+\sum_i\bar a_ix_i \;+\; \max_{\{S\cup\{t\}:\,S\subseteq\{1,\ldots,n\},\left|S\right|\le\lfloor\Gamma\rfloor,\,t\notin S\}}
+\left[\sum_{i\in S}\hat a_i\left|x_i\right| + (\Gamma-\lfloor\Gamma\rfloor)\hat a_t\left|x_t\right|\right] \;\le\; b,
+\label{eq:bs-robust-raw}
+\end{equation}
+and this inner maximization itself admits the exact linear-programming
+dual reformulation
+\begin{equation}
+\sum_i\bar a_ix_i + \Gamma z + \sum_ip_i \le b, \quad
+z+p_i\ge\hat a_i\left|x_i\right|\;\;\forall i, \quad z,p_i\ge0,
+\label{eq:bs-robust-lp}
+\end{equation}
+with $(z,p_i)$ new decision variables -- a tractable LP/QP of the same
+order as the nominal problem, with no explicit enumeration of worst-case
+scenarios required.
+\end{theorem}
+\begin{proof}[Proof sketch]
+The raw combinatorial inner maximization above is a linear program
+in the deviation pattern (which coefficients deviate, and whether a
+single fractional-budget coefficient partially deviates): choosing the
+$\Gamma$ largest-impact terms $\hat a_i\left|x_i\right|$ to set at their bound is
+optimal by a standard exchange argument (swapping any smaller-impact
+chosen deviation for a larger-impact unchosen one cannot decrease the
+sum), which is exactly what the combinatorial maximization expresses.
+Writing that LP's own dual (a textbook LP-duality application,
+Theorem~\ref{thm:strong-duality} specialized to this particular
+bounded-knapsack-like LP) replaces the combinatorial $\max$ over
+subsets with the continuous variables $(z,p_i)$ in the LP reformulation
+above, strong duality guaranteeing the two are
+equal; see Bertsimas \& Sim~\cite{bertsimas}, \S2--3, for the full
+derivation, including the case of simultaneously uncertain
+objective coefficients (used identically here for uncertain demand
+entering the balance constraint's right-hand side, a special case with
+$x_i\equiv1$ coefficients on the uncertain terms). This is the formal
+reason \pkg{robust\_\hspace{0pt}opf.py} never needs to solve an explicit inner
+maximization or enumerate worst cases: the LP reformulation above is
+solved directly as part of the outer dispatch QP.
+\end{proof}
+
+\begin{corollary}[Monotonicity of the price of robustness]
+\label{cor:price-robustness}
+The optimal value of the LP reformulation above is non-decreasing in
+$\Gamma$ for $\Gamma\in[0,n]$, since enlarging $\Gamma$ only enlarges the
+feasible region of the raw combinatorial inner maximization
+(more simultaneous worst-case deviations are permitted), which can only
+tighten -- never loosen -- the resulting deterministic constraint
+on the outer minimization. This is the formal
+reason this module's own ``price of robustness'' sweep is monotonic by
+construction, not merely an empirical regularity: $\Gamma=0$ recovers
+the nominal (deterministic) problem exactly, and $\Gamma=n$ recovers the
+fully conservative box-uncertainty worst case.
+\end{corollary}
+
+\section{Battery/storage arbitrage dispatch}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.46\textwidth]{Images/flowchart_battery_storage.png}
+\caption{Process flow of \pkg{battery\_storage.py}.}
+\end{figure}
+
+\pkg{battery\_\hspace{0pt}storage.py} solves LP-optimal price-arbitrage dispatch,
+\begin{equation}
+\min_{P_t}\; \sum_t \pi_t P_t \quad \text{s.t.}\quad
+\text{SoC}_{t+1}=\text{SoC}_t+P_t\,\Delta t,\;\;
+P_t\in[-\bar P,\bar P],\;\; \text{SoC}_t\in[\text{SoC}_{\min},\text{SoC}_{\max}],
+\label{eq:battery-lp}
+\end{equation}
+via \pkg{cvxpy} (Python) / \texttt{linprog} (MATLAB). Verified on a
+10\,kWh/3\,kW battery against a 12-period price series: both languages
+reproduce the identical bang-bang schedule
+$P=[2,\allowbreak-3,\allowbreak3,\allowbreak3,\allowbreak-3,\allowbreak-3,\allowbreak-3,\allowbreak3,\allowbreak3,\allowbreak-1,\allowbreak-3,\allowbreak-3]$\,kW, cost = $-\$237.0$, to the exact
+value -- a full, no-discrepancy match, with no bugs found in either
+implementation on the first live run.
+
+\begin{proposition}[Bang-bang structure of the arbitrage optimum]
+\label{prop:bangbang}
+The battery arbitrage dispatch above is a linear program (linear objective, linear
+equality/inequality constraints), so by the fundamental theorem of
+linear programming an optimal solution is attained at a vertex (basic
+feasible solution) of the feasible polytope -- see Bertsimas \&
+Tsitsiklis~\cite{bertsimastsitsiklis}, Thm.~2.7 (restated as the main
+course's own Theorem~12). A vertex of this particular polytope has every
+$P_t$ either at a bound ($\pm\bar P$) or determined exactly by an active
+$\text{SoC}$ bound, which is the formal reason the verified optimal
+schedule is observed to be \emph{bang-bang} (every entry of $P$ equal to
+$\pm3$\,kW) except at the one timestep ($P_{10}=-1$\,kW) where the
+$\text{SoC}_{\min}=0$ bound binds and pins the power to exactly the
+value draining the battery to empty without overshooting -- not an
+approximation artifact, but the exact, predicted structure of an LP
+vertex solution.
+\end{proposition}
+
+\section{Market clearing, congestion pricing, and real options}
+\label{sec:merit-order-theory}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_market_planning.png}
+\caption{Process flow of \pkg{market\_planning.py}.}
+\end{figure}
+
+\pkg{market\_\hspace{0pt}planning.py} adds a uniform-price merit-order market
+clearing (sorted bids, clearing price read off the marginal bid, not a
+solver dual -- see \S\ref{ch:verification}'s dual-sign-bug discussion for
+why), a two-node congested-network LMP example, and binomial-lattice
+real-option valuation.
+
+\begin{theorem}[Merit-order clearing is LP-optimal, and the clearing price is the dual variable]
+\label{thm:merit-order}
+For supply bids $(q_i,\pi_i)$ (quantity, price) and demand $d$, the
+cost-minimizing dispatch $\min_{0\le x_i\le q_i}\sum_i\pi_ix_i$ s.t.\
+$\sum_ix_i=d$ is solved exactly by the merit-order rule (accept bids in
+ascending price order until $d$ is met), and the equality constraint's
+KKT multiplier $\lambda^\star$ equals the marginal (last-accepted)
+bid's price.
+\end{theorem}
+\begin{proof}
+This is a linear program; by Theorem~\ref{thm:strong-duality}, KKT
+stationarity for each $x_i$ in the interior of $[0,q_i]$ gives
+$\pi_i=\lambda^\star$ (every partially-accepted bid shares the single
+market-clearing price $\lambda^\star$), while complementary slackness
+forces $x_i=q_i$ (fully accepted) for any bid with $\pi_i<\lambda^\star$
+and $x_i=0$ (rejected) for any bid with $\pi_i>\lambda^\star$ -- exactly
+the merit-order rule, since any other feasible dispatch could be
+strictly improved by an exchange argument (swap one unit from a
+higher-priced accepted bid to a lower-priced rejected one, reducing
+cost, until no such exchange remains, which is precisely the sorted-
+order solution). This is the main course's own Theorem~22, restated here
+self-contained for the market module's own two formulations: the plain
+merit-order clear (Eq.\ not shown, implemented directly by sorting) and
+the congested two-node LMP problem given below, where the per-
+node balance constraints $P_a-f=d_a$, $P_b+f=d_b$ each contribute their
+own dual variable $\text{LMP}_a,\text{LMP}_b$ by the identical
+argument applied node-by-node.
+\end{proof}
+
+The two-node LMP problem,
+\begin{equation}
+\min_{P_a,P_b,f}\; \sum_i \pi_i^a P_a^i + \sum_j \pi_j^b P_b^j
+\quad\text{s.t.}\quad P_a-f=d_a,\;\; P_b+f=d_b,\;\; \left|f\right|\le\bar f,
+\label{eq:two-node}
+\end{equation}
+is verified (gen$_a$: 150\,MW@\$18; gen$_b$: 150\,MW@\$48; $d_a=50$,
+$d_b=150$, $\bar f=80$) to give $\text{LMP}_a=\$18$,
+$\text{LMP}_b=\$48$, spread = $\$30$ (the tie line's shadow price), flow
+= $80$\,MW (binding) -- reproduced to the digit in both Python/CVXPY and
+MATLAB/\texttt{linprog} \emph{after} fixing a dual-sign bug present in
+both (\S\ref{ch:verification}). Note that Theorem~\ref{thm:merit-order}
+only identifies the clearing price with \emph{a correctly signed} dual
+variable; it says nothing about which raw sign convention a given
+solver returns for that dual, which is exactly where both independent
+implementations erred (Table~\ref{tab:bugs}).
+
+\begin{theorem}[Real-option value dominates static NPV]
+\label{thm:real-option}
+Let $V_T$ be the (random) underlying project value at the option's
+final exercise date, with payoff $\max(V_T-I,0)$ exercised optimally at
+each node of the binomial lattice via the backward recursion given below. Then the
+option value $O_{0,0}$ computed by the backward recursion satisfies
+$O_{0,0}\ge\max(V_0-I,0)$, the static NPV, with equality iff the
+underlying has zero volatility ($u=d=1$).
+\end{theorem}
+\begin{proof}
+At every interior node the recursion takes
+$O_{t,j}=\max(\text{exercise now},\text{continuation value})\ge
+\text{continuation value}=\frac{p_uO_{t+1,j+1}+(1-p_u)O_{t+1,j}}{1+r}$.
+Unrolling this recursion from $t=0$ to $t=T$ along the ``always
+continue'' branch gives $O_{0,0}\ge\mathbb
+E^{\mathbb Q}\left[\max(V_T-I,0)\right]/(1+r)^T$, the discounted
+risk-neutral expectation of exercising only at maturity. Because
+$x\mapsto\max(x-I,0)$ is a convex function of $x$, Jensen's inequality
+gives $\mathbb E^{\mathbb Q}[\max(V_T-I,0)]\ge\max(\mathbb
+E^{\mathbb Q}[V_T]-I,0)=\max(V_0(1+r)^T-I,0)\ge
+(1+r)^T\max(V_0-I,0)$ (the last step since $(1+r)^T\ge1$ and the
+$\max(\cdot,0)$ is applied to a scaled-up argument), so
+$O_{0,0}\ge\max(V_0-I,0)$, the static NPV. Equality throughout requires
+Jensen's inequality to be tight, which (for a strictly convex function
+of a non-degenerate random variable) happens exactly when $V_T$ is
+deterministic, i.e.\ $u=d=1$. This is the main course's own Theorem~23;
+restated here because it is the formal justification for the module's
+own verified zero-volatility collapse test
+(\texttt{test\_\hspace{0pt}binomial\_\hspace{0pt}real\_\hspace{0pt}option\_\hspace{0pt}zero\_\hspace{0pt}volatility\_\hspace{0pt}matches\_\hspace{0pt}static\_\hspace{0pt}npv}),
+not merely a convenient coincidence of the chosen test parameters.
+\end{proof}
+
+The binomial real-option backward recursion,
+\begin{equation}
+O_{t,j} = \max\left(V_{t,j}-I,\;\; \frac{p_u O_{t+1,j+1}+(1-p_u)O_{t+1,j}}{1+r}\right),
+\qquad V_{t,j}=V_0 u^j d^{t-j},
+\label{eq:binomial}
+\end{equation}
+is verified to give $\text{static\ NPV}=\$10.0$,
+$\text{option\ value}=\$27.3590$ on the test parameters $(V_0=100,
+I=90, u=1.25, d=0.85, p_u=0.5, n=4, r=0.08)$ -- strictly greater than the
+static NPV, confirming Theorem~\ref{thm:real-option}, and confirmed to
+collapse exactly to the static NPV at zero volatility ($u=d=1$).
+
+\section{A MOST-equivalent multi-period scheduling tool}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_most_scheduling.png}
+\caption{Process flow of \pkg{most\_scheduling.py}.}
+\end{figure}
+
+\pkg{most\_\hspace{0pt}scheduling.py}/\pkg{psat\_\hspace{0pt}most.m} reproduce the advertised
+feature set of MATPOWER's companion MOST tool -- multi-period unit
+commitment, ramping, minimum up/down time, storage, reserves, deferrable
+demand, N-1 security via LODF, and two-stage stochastic commitment --
+which PSAT has no native equivalent of at all. Because neither MILP
+solver used (HiGHS via Pyomo; MATLAB's \texttt{intlinprog}) accepts a
+true quadratic objective, each generator's convex cost is approximated
+by four linear segments of increasing marginal cost; because marginal
+cost strictly increases from segment to segment, a cost-minimizing solver
+always fills the cheapest segment first with no extra ordering
+constraint, a standard exact property of convex piecewise-linear costs.
+Verified to within $0.0007\%$ of an exact QP solve.
+
+\begin{proposition}[Piecewise-linear segment filling requires no ordering constraint]
+\label{prop:pwl}
+Let a generator's cost be approximated by $K$ linear segments with
+strictly increasing marginal costs $m_1<m_2<\cdots<m_K$ over consecutive
+output ranges, modeled by $K$ non-negative decision variables
+$P=\sum_k p_k$, $0\le p_k\le\Delta_k$ (segment width), cost
+$\sum_km_kp_k$. Then any cost-minimizing solution automatically
+satisfies $p_k=\Delta_k$ (segment $k$ full) for every $k$ with a cheaper
+unfilled alternative, i.e.\ segments fill in increasing order of $m_k$,
+with no explicit ``fill segment $k$ before $k+1$'' constraint needed.
+\end{proposition}
+\begin{proof}
+Suppose an optimal solution has $p_k<\Delta_k$ (segment $k$ not full)
+while $p_{k'}>0$ for some $k'>k$ (a costlier segment partially used).
+Since $m_k<m_{k'}$, shifting $\varepsilon=\min(\Delta_k-p_k,p_{k'})>0$
+of output from segment $k'$ to segment $k$ keeps $P=\sum_kp_k$ unchanged
+(feasible) while changing total cost by $\varepsilon(m_k-m_{k'})<0$ -- a
+strict improvement, contradicting optimality. Hence no such pair
+$(k,k')$ can exist at an optimum, which is exactly the claimed ordered-
+filling property. This is a direct corollary of the problem's convexity
+(strictly increasing marginal cost is precisely the condition for a
+piecewise-linear cost function to be convex) and requires no integer
+ordering variables, the reason \pkg{most\_\hspace{0pt}scheduling.py}'s MILP
+formulation needs binary variables only for commitment, never for
+segment order.
+\end{proof}
+
+\textbf{Cross-language validation}: on a hand-traceable cycling-economics
+scenario (a baseload unit plus a pricier unit with a \$200 startup cost
+and \$5/period no-load cost, demand oscillating $[40,\allowbreak70,\allowbreak40,\allowbreak70,\allowbreak40]$\,MW),
+both the Python/HiGHS and MATLAB/\texttt{intlinprog} solvers -- built
+completely independently -- reproduce the identical commitment pattern
+$u=[0,1,1,1,0]$ and total cost \$3615.0000 to the penny.
+
+\textbf{Security constraint, with a genuine LODF bug found and fixed.}
+The Line Outage Distribution Factor,
+\begin{equation}
+\text{LODF}_{l,k} = \frac{\text{PTDF}_{l,i}-\text{PTDF}_{l,j}}
+{1-(\text{PTDF}_{k,i}-\text{PTDF}_{k,j})},
+\label{eq:lodf}
+\end{equation}
+had an early draft with a spurious extra reactance factor in the
+numerator/denominator, silently under-constraining the dispatch: on a
+3-bus system with a stated 40\,MW post-contingency limit, the resulting
+dispatch actually permitted 58\,MW, caught only by independently
+re-solving the post-contingency network under the chosen dispatch. Fixed
+to the standard textbook formula given above; the identical
+re-solve afterward gives exactly 40.0\,MW.
+
+\begin{theorem}[LODF from the Sherman--Morrison rank-one outage update]
+\label{thm:lodf-derivation}
+Outaging line $k=(p,q)$ with pre-outage admittance $y_k=1/x_k$ is
+equivalent, in the DC model, to adding a rank-one correction
+$-y_k(e_p-e_q)(e_p-e_q)^\top$ to the Laplacian $B'$ (removing exactly
+that line's contribution). The post-outage reduced Laplacian is
+therefore $B'_{\text{post}}=B'-y_k ww^\top$ with $w=e_p-e_q$, and
+Theorem~\ref{thm:sherman-morrison} gives
+\begin{equation}
+(B'_{\text{post}})^{-1} = (B')^{-1} + \frac{y_k(B')^{-1}ww^\top(B')^{-1}}{1-y_kw^\top(B')^{-1}w}.
+\label{eq:lodf-sm}
+\end{equation}
+Combined with $\text{PTDF}=\text{diag}(y)A(B')^{-1}$ (branch flow as
+a linear function of injections, $A$ the reduced incidence matrix), the
+change in any monitored line $l$'s flow caused by outaging $k$, divided
+by line $k$'s pre-outage flow, reduces exactly to the standard LODF
+formula stated earlier
+-- with \emph{no} extra factor of $x_k$ anywhere in the final expression,
+because the $y_k$ appearing in the rank-one update numerator and the
+$y_k$ implicit in $\text{PTDF}_{k,\cdot}$'s own definition cancel
+algebraically.
+\end{theorem}
+\begin{proof}[Proof sketch]
+Two substitutions turn the rank-one update above into the LODF formula
+stated earlier. First,
+by definition $\text{PTDF}_{k,i}-\text{PTDF}_{k,j}=y_k\,e_k^\top
+A(B')^{-1}w=y_k\,w^\top(B')^{-1}w$ (using $A^\top e_k=w$ for the branch-$k$
+row of the incidence matrix, and $(B')^{-1}$ symmetric), so the
+denominator of the rank-one update, $1-y_kw^\top(B')^{-1}w$, is exactly
+$1-(\text{PTDF}_{k,i}-\text{PTDF}_{k,j})$ -- matching
+the LODF formula's own denominator with no leftover factor of $x_k$ or
+$y_k$, since the single $y_k$ introduced by the Sherman--Morrison
+numerator is exactly the $y_k$ already implicit in the definition of
+$\text{PTDF}_{k,i}-\text{PTDF}_{k,j}$ itself. Second, propagating
+the same substitution through $\text{PTDF}_{l,\cdot}
+(B'_{\text{post}})^{-1}$'s numerator correction term and dividing by
+line $k$'s own pre-outage flow (which carries the \emph{same} prefactor
+$y_k\,e_l^\top A(B')^{-1}w$ structure for the monitored line $l$)
+cancels every remaining $y_k$, leaving exactly the ratio of
+$\text{PTDF}$ differences the LODF formula states. The complete
+line-by-line bookkeeping is standard; see Wood, Wollenberg \&
+Sheblé~\cite{woodwollenberg}, \S11.2, for the full derivation. This
+confirms, by direct algebraic derivation -- not only by the independent
+post-contingency re-solve this project actually used to catch the bug
+-- that the standard LODF formula is the unique algebraically correct formula,
+and that the spurious extra reactance factor in the first draft could
+not have arisen from a correct application of the Sherman--Morrison
+identity.
+\end{proof}
+
+\section{Stability-constrained optimal power flow}
+\label{sec:stability-opf-theory}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_stability_constrained_opf.png}
+\caption{Process flow of \pkg{stability\_constrained\_opf.py}.}
+\end{figure}
+
+\pkg{stability\_\hspace{0pt}constrained\_\hspace{0pt}opf.py}/\pkg{psat\_\hspace{0pt}stability\_\hspace{0pt}constrained\_\hspace{0pt}
+opf.m} couple a DC-OPF dispatch to a genuine multi-machine small-signal
+stability check -- none of PSAT's dispatch-side tools touch dynamic
+eigenvalues at all. Linearizing the swing equation about an operating
+point $\theta^\star$ gives
+\begin{equation}
+A = \begin{bmatrix}0 & I \\ -M^{-1}K(\theta^\star) & -M^{-1}D\end{bmatrix},
+\qquad K_{ij}(\theta^\star)=B_{ij}\cos(\theta_i^\star-\theta_j^\star),
+\label{eq:stability-A}
+\end{equation}
+with $M=\text{diag}(2H_i)$. Because $\cos(\cdot)$ changes sign exactly
+at a $90^\circ$ angle difference, the system's stability undergoes a
+genuine discontinuous transition there, not a gradual degradation --
+verified directly: sweeping one line's angle difference through
+$89^\circ\to90^\circ\to91^\circ$ gives maximum eigenvalue real part
+$-0.0500\to-0.0500\to+0.0466$ (stable, boundary, unstable). For a
+uniformly $H$/$D$-parameterized system, the eigenvalue real part stays
+pinned at exactly $-D/(4H)$ for every stable configuration, regardless of
+$K$'s magnitude, until the $90^\circ$ crossing itself.
+
+\begin{theorem}[Multi-machine linearized stability, generalizing Theorem~\ref{thm:vsm}]
+\label{thm:multimachine-stability}
+$K(\theta^\star)\in\mathbb{R}^{n\times n}$ in the linearized state
+matrix above is
+itself a weighted graph Laplacian (Definition in
+\S\ref{sec:graph-prelim}) with edge weights $B_{ij}\cos(\theta_i^\star-
+\theta_j^\star)$, which are positive exactly for lines with angle
+difference under $90^\circ$. If every line's angle difference satisfies
+$\left|\theta_i^\star-\theta_j^\star\right|<90^\circ$ (every edge weight positive),
+then by Theorem~\ref{thm:laplacian}, $K(\theta^\star)$ is PSD with a
+single zero eigenvalue (eigenvector $\mathbf1$, the physically arbitrary
+common angle reference), and the linearized system $A$ given
+above has exactly one trivial zero eigenvalue (from the
+reference-angle mode) and every other eigenvalue in the open left half-
+plane whenever $D_i>0$ for every $i$. If instead some line's angle
+difference exceeds $90^\circ$, $K(\theta^\star)$ generically loses
+positive semi-definiteness (it becomes an \emph{indefinite}, signed
+Laplacian) and $A$ generically acquires at least one eigenvalue with
+strictly positive real part.
+\end{theorem}
+\begin{proof}
+Write the swing-equation energy function $W(\delta,\omega)=
+\tfrac12\omega^\top M\omega+U(\delta)$ with potential
+$U(\delta)=-\sum_{i<j}B_{ij}\cos(\delta_i-\delta_j)$ (the standard
+power-system transient-energy function, Kundur~\cite{kundur}, Ch.~12).
+Its Hessian in $\delta$ at $\delta^\star$ is exactly $K(\theta^\star)$:
+$\partial^2U/\partial\delta_i\partial\delta_j=-B_{ij}\cos(\theta_i^\star-
+\theta_j^\star)$ off-diagonal (matching $K$'s off-diagonal entries up to
+the sign convention absorbed into $A$) and
+$\partial^2U/\partial\delta_i^2=\sum_{j}B_{ij}\cos(\theta_i^\star-
+\theta_j^\star)$ on the diagonal, which is exactly a weighted Laplacian
+with weights $B_{ij}\cos(\theta_i^\star-\theta_j^\star)$. When every
+weight is positive, Theorem~\ref{thm:laplacian} applies directly (the
+proof there uses only positivity of the edge weights, not that they
+equal a physical susceptance): $K(\theta^\star)\succeq0$ with the
+single null direction $\mathbf1$, meaning $\theta^\star$ is a local
+minimum of $U$ along every direction except the physically meaningless
+uniform angle shift -- the standard Lyapunov argument for swing-equation
+stability (energy function has a local minimum at the equilibrium) then
+gives local asymptotic stability of the full $(\delta,\omega)$ system
+once positive damping is added, matching the single-machine case's
+Theorem~\ref{thm:vsm} exactly but now for $n$ coupled machines. Once a
+weight turns negative, $K(\theta^\star)$ is no longer guaranteed
+PSD and $\theta^\star$ is generically a saddle point of $U$, not a
+local minimum, matching the observed sign flip in the eigenvalue
+sweep.
+\end{proof}
+
+\begin{corollary}[Angle-difference limits are a conservative convex certificate for stability]
+\label{cor:angle-certificate}
+A per-line angle-difference limit of $40$--$70^\circ$ (strictly inside
+the $90^\circ$ threshold, as used throughout
+\pkg{stability\_\hspace{0pt}constrained\_\hspace{0pt}opf.py}) is \emph{sufficient}
+for the stability condition of Theorem~\ref{thm:multimachine-stability}
+(every weight stays positive, with margin), but not formally
+\emph{necessary} for stability in general (a system could in principle
+have one line beyond $90^\circ$ while the aggregate Laplacian structure
+still happens to stay PSD on the relevant subspace). This asymmetry --
+a tractable convex sufficient condition standing in for an intractable
+exact one -- is the same structural trade-off every convex
+restriction of a non-convex feasible region makes, and is stated here
+explicitly rather than left implicit, consistent with
+\S\ref{ch:limitations}'s honesty discipline.
+\end{corollary}
+
+A per-line angle-difference limit is used as a convex, OPF-embeddable
+proxy for stability (angle-difference bounds are linear in the decision
+variables, unlike a direct eigenvalue-sign constraint, which is not a
+convex -- or even explicit -- function of dispatch), with an iterative
+cutting-plane loop adding a binding constraint for any violating line
+until none remain. On a 4-bus ring test system (branch reactances
+$[1.8,0.3,0.3,0.3]$\,pu, demand $[0,140,120,0]$\,MW): the unconstrained
+economic dispatch concentrates generation at the cheap slack bus
+($P_g=[260,0,0,0]$, cost \$2600.00, worst angle $75.63^\circ$, already
+stable); a $50^\circ$ limit forces $P_g=[173.17,50.0,36.83,0]$, cost
+\$5205.02 -- a \textbf{price of stability of +100.19\%} -- verified
+monotonically non-decreasing as the limit tightens, and verified to
+report infeasibility honestly (rather than crash) when no feasible
+dispatch exists under a sufficiently tight limit.
+
+%=============================================================
+\chapter{Security and Resilience Extensions}
+\label{ch:resilience}
+%=============================================================
+
+\section{DC state estimation and stealthy false-data injection}
+\label{sec:fdia-theory}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_fdia_state_estimation.png}
+\caption{Process flow of \pkg{fdia\_state\_estimation.py}.}
+\end{figure}
+
+\pkg{fdia\_\hspace{0pt}state\_\hspace{0pt}estimation.py} builds a DC state-estimation measurement
+model (bus-injection and branch-flow measurements) on PYPOWER's real
+\texttt{case9} network, extending PSAT's own PMU-placement
+(\texttt{fm\_pmuloc}) and state-estimation (\texttt{fm\_lssest}) routines
+with the bad-data-detection and attack-construction capability neither
+has. The weighted-least-squares estimate and chi-square detection
+statistic are
+\begin{equation}
+\hat x = (H^\top R^{-1}H)^{-1}H^\top R^{-1}z, \qquad
+J = r^\top R^{-1}r,\quad r=z-H\hat x,
+\label{eq:se}
+\end{equation}
+flagged as bad data when $J$ exceeds the $\chi^2_{1-\alpha}(m-n)$
+threshold -- the exact test Theorem~\ref{thm:chisquare} derives,
+specialized to $k=m-n$ degrees of freedom for this WLS residual.
+
+\begin{theorem}[Exact characterization of undetectable (stealthy) attacks]
+\label{thm:fdia-exact}
+Let $z_a=z+a$ be the attacked measurement vector for some attack vector
+$a\ne0$, giving attacked estimate $\hat x_a=(H^\top R^{-1}H)^{-1}H^\top
+R^{-1}z_a$ and residual $r_a=z_a-H\hat x_a$. Then $r_a=r$ (the residual,
+and hence $J$, is \emph{exactly} unchanged by the attack) \emph{if and
+only if} $a\in\text{range}(H)$, i.e.\ $a=Hc$ for some $c\in
+\mathbb{R}^n$ -- and in that case the attacked state estimate shifts by
+exactly $\hat x_a=\hat x+c$, the attacker's chosen vector.
+\end{theorem}
+\begin{proof}
+($\Leftarrow$) If $a=Hc$: $\hat x_a=(H^\top R^{-1}H)^{-1}H^\top
+R^{-1}(z+Hc)=\hat x+(H^\top R^{-1}H)^{-1}H^\top R^{-1}Hc=\hat x+c$, so
+$r_a=z+Hc-H(\hat x+c)=z-H\hat x=r$ exactly, by direct cancellation --
+the computation given informally in the main text, now exhibited as a
+genuine ``if'' direction. ($\Rightarrow$) Conversely, suppose $r_a=r$.
+Define the residual (hat) matrix $S=I-H(H^\top R^{-1}H)^{-1}H^\top
+R^{-1}$, an oblique projector satisfying $r=Sz$ for every $z$ (idempotent,
+$S^2=S$, with $\text{range}(H)=\ker(S)$ -- direct verification from
+the definition of $S$). Then $r_a=S(z+a)=r+Sa$, so $r_a=r$ forces
+$Sa=0$, i.e.\ $a\in\ker(S)=\text{range}(H)$, establishing $a=Hc$ for
+some $c$. Thus $a=Hc$ is not merely \emph{a} family of stealthy attacks
+but \emph{exactly} the set of perfectly undetectable ones -- this is the
+main course's own Theorem~19, restated here with the full both-
+directions proof (the main text's informal derivation only showed the
+easy direction); see also Liu, Ning \&
+Reiter~\cite{liu}, \S4, for the original construction.
+\end{proof}
+
+Reusing this course's own already-verified case9 setup, the stealthy
+attack leaves $J$ identical to the clean case to the numerical noise
+floor while shifting the state estimate by exactly the attacker's chosen
+vector, confirmed robust across 10 independent random seeds, whereas a
+random (non-stealthy) bad-data injection of comparable magnitude is
+correctly flagged by the same test -- exactly the dichotomy
+Theorem~\ref{thm:fdia-exact} predicts, since a generic random
+perturbation lies in $\text{range}(H)$ only with probability zero
+(a measure-zero $n$-dimensional subspace of the $m$-dimensional
+measurement space, $m>n$).
+
+\section{Extended attack surface: GPS spoofing and a measurement-protection game}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_attack_surface.png}
+\caption{Process flow of \pkg{attack\_surface.py}.}
+\end{figure}
+
+\pkg{attack\_\hspace{0pt}surface.py} adds two further, mechanism-distinct attack
+dimensions. \textbf{GPS spoofing} on a PMU's time reference shifts its
+reported phase angle by
+\begin{equation}
+\Delta\theta = 2\pi f_{\text{nominal}}\,\Delta t,
+\label{eq:gps-spoof}
+\end{equation}
+for a clock offset $\Delta t$; a single spoofed PMU generically fails to
+lie in $\text{range}(H)$ and is (correctly) flagged by the same
+chi-square test, but an attacker able to spoof enough clocks
+simultaneously can choose each $\Delta t$ to realize \emph{any} $a=Hc$
+attack exactly -- GPS spoofing is shown to be an alternative physical
+delivery mechanism for the identical stealthy construction, not a new
+detection loophole.
+
+The \textbf{measurement-protection game} formalizes an empirical finding
+from this course's own teaching content (protecting 8 of 17 measurements
+blocks every stealthy attack) as the exact linear-algebra condition it
+is.
+
+\begin{theorem}[Measurement-protection rank condition]
+\label{thm:protection-rank}
+Partition the measurements into a protected set $P$ (rows the attacker
+cannot alter) and an unprotected set $U$, with $H=\begin{bmatrix}H_P\\
+H_U\end{bmatrix}$ after reordering. An attacker confined to $U$ (i.e.\
+$a_P=0$) can realize a nonzero stealthy attack ($a=Hc\ne0$ with
+$a_P=0$) if and only if $H_P$ does \emph{not} have full column rank $n$.
+Equivalently, protecting $P$ blocks \emph{every} possible stealthy
+attack if and only if $\text{rank}(H_P)=n$.
+\end{theorem}
+\begin{proof}
+($\Leftarrow$, contrapositive) If $\text{rank}(H_P)<n$, then $H_P$ has
+a nontrivial null space: there exists $c\ne0$ with $H_Pc=0$. Taking
+$a=Hc$ (a valid stealthy attack by Theorem~\ref{thm:fdia-exact}) gives
+$a_P=H_Pc=0$ exactly -- the attacker needs to alter no protected
+measurement at all, realizing a nonzero attack using only unprotected
+measurements in $U$ (since $a_U=H_Uc$ need not vanish for a generic
+$c$ in $\ker(H_P)$ outside $\ker(H)$, and $\ker(H)=\{0\}$ whenever $H$
+itself has full column rank, the standing observability assumption).
+($\Rightarrow$, contrapositive) If $\text{rank}(H_P)=n$, then
+$H_Pc=0\Rightarrow c=0$ (full column rank means trivial null space), so
+$a_P=H_Pc=0$ forces $c=0$ and hence $a=Hc=0$ -- no nonzero stealthy
+attack can avoid touching $P$. Both directions together give the
+claimed ``if and only if''. See also the parallel treatment in
+Kosut et al.\ and the main course's own Theorem~19's corollary on
+measurement protection.
+\end{proof}
+
+\begin{corollary}[Minimum protection size is governed by $H$'s column structure]
+\label{cor:min-protection}
+The smallest protection set $P$ satisfying Theorem~\ref{thm:protection-rank}
+has $\left|P\right|\ge n$ (a rank-$n$ matrix needs at least $n$ rows), with
+equality achievable if and only if some $n$ rows of $H$ are linearly
+independent and span a complement making the remaining structure
+observable -- generically true for a well-conditioned $H$, but the
+\emph{specific} rows that work depend on $H$'s own structure, which is
+exactly why this module's greedy heuristic (adding, at each step, the
+unprotected measurement whose addition most increases $\text{rank}
+(H_P)$) is not guaranteed optimal: greedy rank-augmentation is a
+matroid-type problem for which the greedy algorithm IS optimal under a
+matroid independence structure, but the \emph{specific} objective here
+(minimum cardinality spanning set) coincides with matroid-greedy
+optimality only when no additional combinatorial cost differentiates
+candidate rows -- confirmed directly by this module's own brute-force
+comparison finding cases where greedy is suboptimal.
+\end{corollary}
+
+A greedy defense heuristic is built and directly compared against
+brute-force optimal, confirming the 8-measurement minimum defense and
+the under-10-measurement zero-attacker-freedom threshold predicted by
+Theorem~\ref{thm:protection-rank} and Corollary~\ref{cor:min-protection},
+and showing greedy is not always optimal.
+
+\section{Cascading failure and N-k analysis}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.45\textwidth]{Images/flowchart_cascading_failure.png}
+\caption{Process flow of \pkg{cascading\_failure.py}.}
+\end{figure}
+
+\pkg{cascading\_\hspace{0pt}failure.py} extends the single-level N-1 screen of
+Chapter~\ref{ch:architecture} to a sequential cascade: after every line
+trip, the DC power-flow model $P=B\theta$ is re-solved, and the single
+most-overloaded remaining in-service line ($\left|\text{flow}\right|>\text{factor}\times\text{rate}A$,
+where $\text{factor}>1$ is the overload-trigger multiplier) trips next, stopping when no line is
+overloaded or the network islands. Verified on a specially constructed
+``overload-rich'' test system to produce a genuine, hand-checkable 2-step
+cascade; an honest null result is also reported -- PYPOWER's
+\texttt{case118} did \emph{not} cascade under the overload factors
+tested, reported as found rather than adjusted to manufacture a more
+dramatic result.
+
+\section{Decentralized wide-area frequency control}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.46\textwidth]{Images/flowchart_wide_area_control.png}
+\caption{Process flow of \pkg{wide\_area\_control.py}.}
+\end{figure}
+
+\pkg{wide\_\hspace{0pt}area\_\hspace{0pt}control.py} generalizes PSAT's own single/two-area AGC
+content to $K>2$ areas with no central coordinator, each area's own AGC
+integrator driven by a Metropolis--Hastings weighted consensus average of
+its neighbors' area control error,
+\begin{equation}
+\text{ACE}_k = \left(P_{\text{tie},k}^{\text{actual}}-P_{\text{tie},k}^{\text{sched}}\right)
++ \beta_k\,(f-f_{\text{nominal}}).
+\label{eq:ace}
+\end{equation}
+\textbf{A genuine instability was found and fixed}: applying the
+consensus weight matrix only once per physical timestep is unstable, not
+merely slow -- a 4-area case's frequency deviation stayed under
+0.01\,Hz through $t=150$\,s, then diverged to $29{,}821.0$\,Hz by
+$t=600$\,s, because the AGC integrator has no mechanism to ``forget'' the
+small per-step averaging error a single consensus application leaves
+behind, which compounds through the integrator over time. Fixed by
+applying the consensus matrix repeatedly (20 sub-iterations) per physical
+step, after which the maximum deviation at $t=300$\,s is $1.06\times
+10^{-5}$\,Hz, matching the centralized baseline to that same tolerance.
+
+%=============================================================
+\chapter{Control Extensions}
+\label{ch:control}
+%=============================================================
+
+\section{MPC and LQR from a PSAT linearization}
+\label{sec:mpc-theory}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.46\textwidth]{Images/flowchart_mpc_export.png}
+\caption{Process flow of \pkg{mpc\_export.py}.}
+\end{figure}
+
+\pkg{mpc\_\hspace{0pt}export.py}/\pkg{psat\_\hspace{0pt}discretize.m}+\pkg{psat\_\hspace{0pt}mpc\_\hspace{0pt}design.m}
+turn Chapter~\ref{ch:architecture}'s $(A,B,C,D)$ export into a finite-
+horizon MPC and an infinite-horizon LQR baseline.
+
+\begin{theorem}[Exact zero-order-hold discretization]
+\label{thm:zoh}
+For $\dot x=Ax+Bu$ with $u(t)\equiv u_k$ held constant for
+$t_k\le t<t_k+\Delta t$, the exact state at $t_k+\Delta t$ is
+$x(t_k+\Delta t)=A_dx(t_k)+B_du_k$ with $A_d=e^{A\Delta t}$,
+$B_d=\left(\int_0^{\Delta t}e^{A\tau}d\tau\right)B$, and
+the augmented-matrix-exponential formula above computes both simultaneously via a single matrix
+exponential of the augmented block matrix.
+\end{theorem}
+\begin{proof}
+The variation-of-constants formula gives $x(t_k+\Delta t)=
+e^{A\Delta t}x(t_k)+\int_0^{\Delta t}e^{A(\Delta t-\tau)}Bu_k\,d\tau=
+e^{A\Delta t}x(t_k)+\left(\int_0^{\Delta t}e^{As}ds\right)Bu_k$ (substituting
+$s=\Delta t-\tau$), matching $A_d,B_d$ above. For the augmented matrix
+exponential, direct block computation gives
+$\exp\left(\begin{bmatrix}A&B\\0&0\end{bmatrix}\Delta t\right)=
+\begin{bmatrix}e^{A\Delta t} & \int_0^{\Delta t}e^{As}ds\,B\\ 0 &
+I\end{bmatrix}$ (the $(2,2)$ block exponentiates the zero matrix to
+$I$; the $(1,2)$ block is exactly the integral series for $B_d$, since
+the augmented matrix's own power series reproduces the Duhamel/
+variation-of-constants integral term-by-term) -- see Van Loan's classic
+1978 note on computing matrix exponentials for state-space
+discretization, or Franklin, Powell \& Workman, \emph{Digital Control
+of Dynamic Systems}, \S4.3. This is exact for any $\Delta t$ (no
+truncation error), unlike forward-Euler's $A_d\approx I+A\Delta t$,
+which is only first-order accurate.
+\end{proof}
+
+The finite-horizon MPC solves a quadratic program in $(x,u)$ with
+weights $Q,R_w$ (a direct application of Theorem~\ref{thm:riccati}'s
+backward recursion, truncated to a finite horizon with terminal weight
+$P_N$); the infinite-horizon LQR baseline is obtained from the discrete
+algebraic Riccati equation (DARE), the $N\to\infty$ fixed point of that
+same recursion.
+
+\begin{theorem}[No-preview finite-horizon MPC converges to infinite-horizon LQR]
+\label{thm:mpc-lqr}
+For a disturbance-free, unconstrained finite-horizon LQR problem with
+terminal weight $P_N=Q$ (or any $P_N\succeq0$), the Riccati recursion
+given earlier run backward from $P_N$ converges, as the
+horizon $N\to\infty$, to the unique stabilizing solution $P_\infty$ of
+the DARE, and the resulting first-step gain $K_0\to K_{\text{lqr}}=
+(R_w+B_d^\top P_\infty B_d)^{-1}B_d^\top P_\infty A_d$.
+\end{theorem}
+\begin{proof}
+The Riccati recursion given earlier, run backward, is
+exactly the Riccati \emph{difference} equation iterated forward in the
+reversed index $j=N-k$; under stabilizability of $(A_d,B_d)$ and
+detectability of $(A_d,Q^{1/2})$ (Theorem~\ref{thm:riccati}'s standing
+hypotheses), this iteration is a monotone, bounded sequence of PSD
+matrices (monotone because adding one more stage to the horizon can only
+weakly increase the achievable cost-to-go's curvature; bounded above
+because the DARE's stabilizing solution provides a fixed upper bound,
+and below by $0$), hence convergent by the monotone convergence theorem
+for matrix sequences in the Loewner order; the limit must be a fixed
+point of that same recursion, i.e.\ a solution of the DARE, and
+standard DARE theory (Anderson \& Moore~\cite{andersonmoore}, Ch.~2)
+identifies the limit of this particular (monotone, from $P_N\succeq0$)
+sequence as the \emph{stabilizing} solution specifically, not one of the
+DARE's other (non-stabilizing) solutions. This formally explains the
+module's own verified numeric convergence
+($N=1$: $K_0=-1.319044$; $N\ge5$: converged to $-1.410434=
+-K_{\text{lqr}}$ computed independently via
+\texttt{scipy.linalg.solve\_\hspace{0pt}discrete\_\hspace{0pt}are}) as an instance of a
+general theorem, not a property specific to the one test system used.
+\end{proof}
+
+Verified: a no-disturbance-preview finite-horizon MPC's first-step
+control converges smoothly as the horizon $N$ grows ($N=1$: $-1.319044$;
+$N\ge5$: $-1.410434$, stable) to exactly $-K_{\text{lqr}}x_0=-1.410434$,
+where $K_{\text{lqr}}=1.41043436$ is computed independently from the
+DARE -- a genuine cross-method numeric match isolating disturbance
+preview, not horizon length per se, as the real source of MPC's advantage
+over plain LQR in this course's own worked example (the comparison is
+fair only because Theorem~\ref{thm:mpc-lqr} guarantees both methods
+converge to the \emph{identical} control law in the no-disturbance
+limit, isolating disturbance preview as the one remaining difference).
+
+\S\ref{ch:resilience}'s wide-area control and this chapter's MPC/LQR
+work share one methodological thread: both verify a control design by
+checking convergence to an \emph{independently computed} fixed point
+(the centralized baseline; the DARE gain) rather than only checking that
+the closed loop is numerically stable.
+
+%=============================================================
+\chapter{Learning-Based Methods}
+\label{ch:learning}
+%=============================================================
+
+\section{A graph neural network surrogate for AC power flow}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_gnn_power_flow.png}
+\caption{Process flow of \pkg{gnn\_power\_flow.py}.}
+\end{figure}
+
+\pkg{gnn\_\hspace{0pt}power\_\hspace{0pt}flow.py} trains a plain-PyTorch (no
+\texttt{torch\_geometric}, unavailable in this environment) message-
+passing network on real PYPOWER Newton--Raphson AC solutions. One
+message-passing layer computes, for every directed edge $u\to v$,
+\begin{equation}
+\text{msg}_{uv} = f_\theta\left([x_u,x_v,e_{uv}]\right), \qquad
+\text{agg}_v = \sum_{u:(u,v)\in E}\text{msg}_{uv}, \qquad
+x_v' = g_\phi\left([x_v,\text{agg}_v]\right),
+\label{eq:gnn}
+\end{equation}
+implemented as a batched \texttt{index\_add\_} scatter-sum, functionally
+equivalent to a basic \texttt{torch\_geometric} \texttt{MessagePassing}
+layer with sum aggregation.
+
+\begin{proposition}[Permutation equivariance of message passing]
+\label{prop:gnn-equivariance}
+Let $\pi$ be any permutation of the node index set. If the node/edge
+features are relabeled consistently ($x_{\pi(v)}\leftarrow x_v$,
+$e_{\pi(u)\pi(v)}\leftarrow e_{uv}$), the message-passing layer
+given earlier produces outputs related by the same permutation,
+$x'_{\pi(v)}(\text{relabeled input})=x'_v(\text{original input})$.
+\end{proposition}
+\begin{proof}
+The aggregation $\text{agg}_v=\sum_{u:(u,v)\in E}\text{msg}_{uv}$ is a
+sum over the (unordered) in-neighborhood of $v$, and summation is
+commutative/associative, so it does not depend on any particular
+ordering of the neighbors -- relabeling nodes by $\pi$ merely relabels
+which summands belong to which output index, without changing any
+individual message's value (since $f_\theta$ is applied with the same
+weights to every edge, regardless of node identity). The update
+$x_v'=g_\phi([x_v,\text{agg}_v])$ then inherits the same equivariance.
+This is the standard graph-neural-network permutation-equivariance
+property (see, e.g., Bronstein et al., \emph{Geometric Deep Learning},
+\S2.2--4, for the general theory); it is the formal reason a single
+trained model can be applied unchanged to any bus numbering/ordering of
+a \emph{fixed} topology (what makes batched training over many randomly
+sampled operating points of \texttt{case14} meaningful at all), while
+offering no guarantee whatsoever across \emph{different} topologies
+(different edge sets $E$, different node counts) -- exactly the
+boundary this module's own honest cross-topology negative result
+(below) falls on.
+\end{proof}
+
+\textbf{A genuine training bug was found and
+fixed}: an un-normalized shared loss over both outputs (voltage magnitude
+and angle) let angle error -- with roughly $14\times$ the squared-error
+magnitude spread of voltage magnitude -- dominate every gradient step,
+producing a model that scored \emph{worse} on voltage-magnitude accuracy
+(0.0044\,pu MAE) than a trivial frozen-base-case baseline (0.0014\,pu),
+even though it clearly beat that baseline on angle. Fixed by z-score
+normalizing each output before computing the loss: the identical
+architecture then beats the frozen baseline on \emph{both} outputs
+(0.00137 vs.\ 0.00144\,pu on magnitude; 0.00876 vs.\ 0.01470\,rad on
+angle), with roughly $270\times$ faster batched inference than re-solving
+via Newton--Raphson. An honest negative result is also reported: a model
+trained on \texttt{case14} and evaluated zero-shot on \texttt{case30}
+performs far worse than on its own held-out operating points --
+surrogate models of this kind are topology-specific, not transferable, a
+genuinely useful pedagogical finding rather than a glossed-over
+limitation.
+
+\section{A reinforcement-learning battery-scheduling environment}
+\label{sec:rl-theory}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.46\textwidth]{Images/flowchart_rl_env.png}
+\caption{Process flow of \pkg{rl\_env.py}.}
+\end{figure}
+
+\pkg{rl\_\hspace{0pt}env.py} provides a Gymnasium-compatible battery-scheduling
+environment with an independent exact dynamic-programming optimum as
+ground truth (cross-checked against full brute-force enumeration), the
+same style of honest benchmarking Chapter~\ref{ch:optimization} applies
+to every optimization-under-uncertainty tool in this report.
+
+\begin{theorem}[Bellman optimality and the contraction property of the Bellman operator]
+\label{thm:bellman}
+For a Markov decision process with discount $0\le\gamma_{\text{RL}}<1$,
+bounded reward $r$, the optimal value function $V^\star$ satisfies the
+Bellman optimality equation
+$V^\star(s)=\max_a\left[r(s,a)+\gamma_{\text{RL}}\mathbb E_{s'}[V^\star(s')]\right]$,
+and the Bellman operator $(\mathcal TV)(s)\triangleq\max_a\left[r(s,a)+
+\gamma_{\text{RL}}\mathbb E_{s'}[V(s')]\right]$ is a contraction in the
+sup-norm with modulus $\gamma_{\text{RL}}$, so by
+Theorem~\ref{thm:banach} it has a unique fixed point (necessarily
+$V^\star$) and value iteration $V_{k+1}=\mathcal TV_k$ converges to it
+geometrically from any initialization.
+\end{theorem}
+\begin{proof}
+For any two value functions $V_1,V_2$ and any state $s$, let
+$a_1^\star=\arg\max_aQ_1(s,a)$ where $Q_i(s,a)=r(s,a)+
+\gamma_{\text{RL}}\mathbb E_{s'}[V_i(s')]$. Then $(\mathcal
+TV_1)(s)-(\mathcal TV_2)(s)\le Q_1(s,a_1^\star)-Q_2(s,a_1^\star)=
+\gamma_{\text{RL}}\mathbb E_{s'}[V_1(s')-V_2(s')]\le
+\gamma_{\text{RL}}\|V_1-V_2\|_\infty$ (bounding the expectation by
+the sup-norm difference); by symmetry $\left|(\mathcal TV_1)(s)-(\mathcal
+TV_2)(s)\right|\le\gamma_{\text{RL}}\|V_1-V_2\|_\infty$ for every $s$,
+giving $\|\mathcal TV_1-\mathcal TV_2\|_\infty\le\gamma_{\text{RL}}
+\|V_1-V_2\|_\infty$, the contraction property with modulus
+$\gamma_{\text{RL}}<1$. The space of bounded functions on the (finite,
+here) state space with the sup-norm is complete, so
+Theorem~\ref{thm:banach} applies directly, giving both existence/
+uniqueness of $V^\star$ and geometric convergence of value iteration.
+This is the main course's own Theorem~18 (there attributed to Watkins \&
+Dayan's Q-learning convergence proof, which applies the identical
+contraction argument to the state-action value function $Q$ rather than
+$V$); restated here because it is the formal reason this module's own
+tabular Q-learning benchmark provably converges to the exact DP optimum
+(reward = $60.0$ on this project's reference scenario) given enough
+exploration, independent of the specific exploration schedule used, as
+long as every state-action pair is visited infinitely often (the
+standard stochastic-approximation condition Watkins \& Dayan add on top
+of the deterministic contraction argument above).
+\end{proof}
+
+It reproduces this course's own documented reward-hacking finding:
+removing the terminal-state-of-charge bonus term from the reward
+measurably drains the battery rather than landing it on the intended
+target -- a clean illustration that Theorem~\ref{thm:bellman} guarantees
+convergence to the optimum \emph{of whatever reward function is
+specified}, not to any behavior the designer actually intended; the
+theorem is silent on reward design, which is exactly where this
+particular failure originates (objective mis-specification, not an
+algorithmic failure).
+
+%=============================================================
+\chapter{Uncertainty Quantification}
+\label{ch:uncertainty}
+%=============================================================
+
+\section{Probabilistic power flow}
+\label{sec:ppf-theory}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{Images/flowchart_probabilistic_power_flow.png}
+\caption{Process flow of \pkg{probabilistic\_power\_flow.py}.}
+\end{figure}
+
+\pkg{probabilistic\_\hspace{0pt}power\_\hspace{0pt}flow.py}/\pkg{psat\_\hspace{0pt}probabilistic\_\hspace{0pt}power\_\hspace{0pt}
+flow.m} quantify uncertainty \emph{in a power-flow solution itself}
+(given uncertain bus injections, what is the distribution of line flows?)
+-- a distinct question from Chapter~\ref{ch:optimization}'s
+robust/stochastic \emph{dispatch} tools, which decide what to dispatch
+under uncertainty.
+
+\begin{corollary}[Exactness of analytical PPF for DC power flow]
+\label{cor:ppf-exact}
+If $\text{injections}\sim\mathcal N(\mu_{\text{inj}},\Sigma_{\mathrm
+{inj}})$, then since $\text{flow}=\text{PTDF}\cdot\text{injections}$ is
+an affine (indeed linear) function of a Gaussian vector,
+Theorem~\ref{thm:affine-gaussian} gives \emph{exactly}
+$\text{flow}\sim\mathcal N(\text{PTDF}\,\mu_{\text{inj}},\;
+\text{PTDF}\,\Sigma_{\text{inj}}\,\text{PTDF}^\top)$ -- the analytical
+covariance formula given below
+is not an approximation, moment-matching heuristic, or linearization: it
+is the exact distribution, with no error term, for \emph{any} DC
+network and \emph{any} Gaussian injection distribution. This is why the
+analytical method in this module is validated by showing it is the
+limit Monte Carlo \emph{converges toward} (\S\ref{ch:uncertainty}'s own
+Task~1-style verification), rather than the usual relationship between
+an approximation and a ground truth.
+\end{corollary}
+\begin{proof}
+Direct application of Theorem~\ref{thm:affine-gaussian} with
+$A=\text{PTDF}$, $b=0$; no further argument is needed because DC power
+flow's linearity (not merely approximate linearity, since the DC model
+itself is already a linearization of AC power flow -- a modeling choice
+made once, upstream, not a source of additional error in the
+\emph{uncertainty-propagation} step) makes the affine-transformation
+theorem apply without qualification.
+\end{proof}
+
+Because DC power flow is linear, $\text{flow}=
+\text{PTDF}\cdot\text{injections}$, Gaussian injection uncertainty
+propagates \emph{exactly} via
+\begin{equation}
+\Sigma_{\text{flow}} = \text{PTDF}\,\Sigma_{\text{inj}}\,\text{PTDF}^\top,
+\label{eq:ppf}
+\end{equation}
+with overload probability $\Pr(\left|\text{flow}\right|>\text{rate}A)$ from the
+two-sided Gaussian tail -- computed via the identical quantile machinery
+as Theorem~\ref{thm:chance-tight}, now applied to a flow margin instead
+of a reserve margin. Verified on a 3-bus test system
+($\text{rate}A=[30,100,100]$, $\text{inj\_mean}=[0,-60,40]$,
+$\text{inj\_cov}=\text{diag}([0,25,225])$): analytical branch-1 flow
+mean/std of $26.667/6.009$\,MW matches 20{,}000-sample Monte Carlo
+($26.658/6.005$) closely, with overload probability $0.2895$ (analytical)
+vs.\ $0.2879$ (Monte Carlo) -- and collapses exactly to a deterministic
+DC power-flow solve at zero variance. MATLAB reproduces every number to
+4 decimal places.
+
+\section{Dynamic line rating (IEEE 738)}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.46\textwidth]{Images/flowchart_dynamic_line_rating.png}
+\caption{Process flow of \pkg{dynamic\_line\_rating.py}.}
+\end{figure}
+
+\pkg{dynamic\_\hspace{0pt}line\_\hspace{0pt}rating.py}/\pkg{psat\_\hspace{0pt}dynamic\_\hspace{0pt}line\_\hspace{0pt}rating.m}
+compute weather-dependent conductor ampacity from the IEEE 738
+steady-state heat balance,
+\begin{equation}
+I_{\max} = \sqrt{\frac{q_c+q_r-q_s}{R(T_c)}},
+\label{eq:dlr}
+\end{equation}
+with radiative loss, solar gain, and the larger of two McAdams-type
+forced-convection correlations (each the IEEE 738 standard's own
+published equation), while the underlying air-property coefficients
+(density, viscosity, thermal conductivity as functions of film
+temperature) use general ideal-gas/Sutherland's-law physics where this
+project could not independently verify the standard's own specific
+tables -- stated honestly rather than claimed as a verified reproduction.
+Verified across three weather scenarios (static-like: 793.8\,A; cold and
+windy: 2284.1\,A; hot and calm: 165.5\,A), every result's heat-balance
+residual near machine precision ($\sim10^{-13}$), with the wind-angle
+factor
+\begin{equation}
+K(\phi) = 1.194-\cos\phi+0.194\cos2\phi+0.368\sin2\phi
+\label{eq:windangle}
+\end{equation}
+confirmed at its published boundary values ($1.0$ at $90^\circ$, $0.388$
+at $0^\circ$). MATLAB reproduces every ampacity to the decimal.
+
+\begin{proposition}[Existence and uniqueness of the IEEE 738 ampacity solution]
+\label{prop:dlr-unique}
+For fixed weather conditions and conductor temperature $T_c$, the
+ampacity $I_{\max}$ solving $I^2R(T_c)+q_s=q_c(I)+q_r$ (resistive
+heating plus any temperature-dependence of $R$ held fixed, balanced
+against convective and radiative loss, net of solar gain) has a unique
+non-negative solution whenever net cooling at zero current is
+non-negative, because $I\mapsto I^2R(T_c)$ is strictly increasing and
+convex for $I\ge0$ while the right-hand side is independent of $I$ in
+this module's own formulation (convective loss $q_c$ here depends on
+wind/ambient conditions and $T_c$, not on the current $I$ itself, since
+$T_c$ is the \emph{fixed} maximum allowable operating temperature, not a
+free variable solved jointly with $I$).
+\end{proposition}
+\begin{proof}
+Define $g(I)=I^2R(T_c)-(q_c+q_r-q_s)$. Since $R(T_c)>0$ is fixed, $g$ is
+a strictly increasing, continuous function of $I\ge0$ with
+$g(0)=-(q_c+q_r-q_s)$. If $q_c+q_r-q_s\ge0$ (net cooling available),
+$g(0)\le0$ and $g(I)\to\infty$ as $I\to\infty$, so by the intermediate
+value theorem combined with strict monotonicity, $g$ has exactly one
+root $I_{\max}\ge0$ -- which is precisely
+$I_{\max}=\sqrt{(q_c+q_r-q_s)/R(T_c)}$, the closed form
+the IEEE 738 heat-balance equation already uses directly rather than via iterative root-
+finding. If instead $q_c+q_r-q_s<0$ (solar heating alone already
+exceeds available cooling), no non-negative $I$ solves $g(I)=0$, and the
+module correctly returns $I_{\max}=0$ by convention (Chapter~\ref{ch:distribution}'s
+verified ``extreme heat and calm'' test case) rather than a spurious
+negative or complex root, matching exactly this proposition's boundary
+case.
+\end{proof}
+
+%=============================================================
+\chapter{Interoperability with MATPOWER}
+\label{ch:interop}
+%=============================================================
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.46\textwidth]{Images/flowchart_matpower_m_parser.png}
+\hfill
+\includegraphics[width=0.46\textwidth]{Images/flowchart_matpower_to_psat.png}
+\caption{Process flow of \pkg{matpower\_m\_parser.py} (left) and \pkg{matpower\_to\_psat.py} (right).}
+\end{figure}
+
+\pkg{matpower\_\hspace{0pt}m\_\hspace{0pt}parser.py} parses a raw MATPOWER case \texttt{.m} file
+(\texttt{mpc.bus}, \texttt{mpc.gen}, \texttt{mpc.branch}, optionally
+\texttt{mpc.gencost}) into a PYPOWER-compatible dictionary, closing the
+gap that PYPOWER's own \texttt{loadcase()} accepts only \texttt{.mat}/
+\texttt{.py} case files, not the plain-text format MATPOWER itself (and
+this project's larger downloaded PEGASE/RTE cases) actually ships in.
+\pkg{matpower\_\hspace{0pt}to\_\hspace{0pt}psat.py} converts a MATPOWER/PYPOWER case dictionary
+into a PSAT-native data file (\texttt{Bus.con}, \texttt{Line.con},
+\texttt{SW.con}, \texttt{PV.con}, \texttt{PQ.con}, optionally
+\texttt{Supply.con}/\texttt{Demand.con}), using the source-verified
+\pkg{con\_\hspace{0pt}schema.json} column mapping, so a 118-bus or 300-bus standard
+test system can be run directly in PSAT, not only in PYPOWER. Generator
+dynamic data (inertia, reactances, AVR/governor parameters) is
+deliberately \emph{not} fabricated, since a MATPOWER case carries none --
+converted cases are power-flow/OPF-ready but explicitly not claimed
+ready for time-domain or small-signal analysis. Both utilities are
+Python-side file-format infrastructure by design and have no MATLAB
+``port'': the second tool's whole purpose is to write a file MATLAB
+already loads directly via \texttt{runpsat}.
+
+%=============================================================
+\chapter{Verification Methodology and Consolidated Defect Log}
+\label{ch:verification}
+%=============================================================
+
+\section{Cross-language parity}
+
+Every Python module with a natural PSAT-side analogue has a MATLAB port,
+each tested live against MATLAB R2026a. (MATLAB in this development
+environment must be invoked with its process sandbox disabled; under the
+default sandbox, \texttt{matlab -batch} fails with a license-service
+communication error even though the license is valid and network
+connectivity is fine -- a tool-sandbox artifact, not a real licensing
+failure.) Two Python modules are intentionally \emph{not} ported:
+reinforcement learning (\pkg{rl\_\hspace{0pt}env.py}) is fundamentally a
+Python/Gymnasium-ecosystem capability, and document generation
+(\pkg{lab\_\hspace{0pt}report\_\hspace{0pt}generator.py}) is already well served by
+\pkg{python-docx}, with a parallel MATLAB implementation judged lower
+value than the other extensions for the time available. The two
+MATPOWER-format utilities are Python-only infrastructure by design
+(\S\ref{ch:interop}).
+
+\begin{longtable}{@{}p{5cm}p{5.5cm}p{4cm}@{}}
+\caption{Python/MATLAB extension parity map.}
+\label{tab:parity}\\
+\toprule
+Python module & MATLAB port(s) & Verification \\
+\midrule
+\endfirsthead
+\toprule
+Python module & MATLAB port(s) & Verification \\
+\midrule
+\endhead
+\pkg{psat\_\hspace{0pt}io.py} & (reader only; no port needed) & Tested, 3 real files \\
+\pkg{gas\_\hspace{0pt}network.py} & \pkg{psat\_\hspace{0pt}gas\_\hspace{0pt}network.m} & Live, matches to 2 d.p. \\
+\pkg{decentralized\_\hspace{0pt}opt.py} & \pkg{psat\_\hspace{0pt}consensus\_\hspace{0pt}dispatch.m}, \pkg{psat\_\hspace{0pt}decentralized\_\hspace{0pt}opt.m} & Live, exact match \\
+\pkg{stochastic\_\hspace{0pt}opf.py} & \pkg{psat\_\hspace{0pt}chance\_\hspace{0pt}constrained\_\hspace{0pt}reserve.m} & Live, exact match \\
+\pkg{market\_\hspace{0pt}planning.py} & \pkg{psat\_\hspace{0pt}merit\_\hspace{0pt}order.m}, \pkg{psat\_\hspace{0pt}market\_\hspace{0pt}planning.m} & Live, exact match (after dual-sign fix) \\
+\pkg{fdia\_\hspace{0pt}state\_\hspace{0pt}estimation.py} & \pkg{psat\_\hspace{0pt}fdia\_\hspace{0pt}demo.m} & Live, $J$ unchanged under attack \\
+\pkg{mpc\_\hspace{0pt}export.py} & \pkg{psat\_\hspace{0pt}discretize.m}, \pkg{psat\_\hspace{0pt}mpc\_\hspace{0pt}design.m} & Live, exact LQR-gain match \\
+\pkg{rl\_\hspace{0pt}env.py} & \emph{not ported (by design)} & -- \\
+\pkg{visualization\hspace{0pt}.py} & \pkg{psat\_\hspace{0pt}visualize.m} & Live \\
+\pkg{three\_\hspace{0pt}phase\_\hspace{0pt}distribution.py} & \pkg{psat\_\hspace{0pt}three\_\hspace{0pt}phase\_\hspace{0pt}distribution.m} & Live, 4 d.p.\ match after transpose fix \\
+\pkg{short\_\hspace{0pt}circuit.py} & \pkg{psat\_\hspace{0pt}short\_\hspace{0pt}circuit.m} & Live, exact digit match \\
+\pkg{battery\_\hspace{0pt}storage.py} & \pkg{psat\_\hspace{0pt}battery\_\hspace{0pt}storage.m} & Live, exact match, no bugs \\
+\pkg{robust\_\hspace{0pt}opf.py} & \pkg{psat\_\hspace{0pt}robust\_\hspace{0pt}opf.m}, \pkg{psat\_\hspace{0pt}robust\_\hspace{0pt}multi\_\hspace{0pt}uncertainty.m} & Live, exact match \\
+\pkg{cascading\_\hspace{0pt}failure.py} & \pkg{psat\_\hspace{0pt}cascading\_\hspace{0pt}failure.m} & Live, exact match \\
+\pkg{wide\_\hspace{0pt}area\_\hspace{0pt}control.py} & \pkg{psat\_\hspace{0pt}wide\_\hspace{0pt}area\_\hspace{0pt}control.m} & Live, both instability and fix reproduced \\
+\pkg{attack\_\hspace{0pt}surface.py} & \pkg{psat\_\hspace{0pt}attack\_\hspace{0pt}surface.m} & Live on WSCC-9 \\
+\pkg{gnn\_\hspace{0pt}power\_\hspace{0pt}flow.py} & \pkg{psat\_\hspace{0pt}gnn\_\hspace{0pt}power\_\hspace{0pt}flow.m} & Live, trained on 200 real PSAT NR solves \\
+\pkg{most\_\hspace{0pt}scheduling.py} & \pkg{psat\_\hspace{0pt}most.m} & Live, cost match to the penny \\
+\pkg{stability\_\hspace{0pt}constrained\_\hspace{0pt}opf.py} & \pkg{psat\_\hspace{0pt}stability\_\hspace{0pt}constrained\_\hspace{0pt}opf.m} & Live, exact match incl.\ 90$^\circ$ threshold \\
+\pkg{probabilistic\_\hspace{0pt}power\_\hspace{0pt}flow.py} & \pkg{psat\_\hspace{0pt}probabilistic\_\hspace{0pt}power\_\hspace{0pt}flow.m} & Live, 4 d.p.\ match \\
+\pkg{dynamic\_\hspace{0pt}line\_\hspace{0pt}rating.py} & \pkg{psat\_\hspace{0pt}dynamic\_\hspace{0pt}line\_\hspace{0pt}rating.m} & Live, exact digit match \\
+\pkg{lab\_\hspace{0pt}report\_\hspace{0pt}generator.py} & \emph{not ported (by design)} & -- \\
+\pkg{matpower\_\hspace{0pt}m\_\hspace{0pt}parser.py} & \emph{(Python-only infrastructure)} & -- \\
+\pkg{matpower\_\hspace{0pt}to\_\hspace{0pt}psat.py} & \emph{(Python-only infrastructure)} & -- \\
+\emph{(none -- new device)} & \pkg{@ESSclass} & Live, PSAT core integration \\
+\emph{(none -- new device)} & \pkg{@GFMclass} & Live, PSAT core integration \\
+\bottomrule
+\end{longtable}
+
+\section{Consolidated defect log}
+
+Table~\ref{tab:bugs} lists every genuine defect found and fixed during
+development, in rough chronological/thematic order, kept deliberately
+blunt about root cause since the recurring \emph{categories} are the
+real lesson: sign-convention errors (3 independent occurrences across
+two languages and two solvers), the slack-bus-left-unconstrained DC-OPF
+formulation error (documented once, then independently re-triggered in
+two later, unrelated modules), and MATLAB-specific pitfalls
+(\texttt{'} as conjugate transpose, nested functions closing over outer
+data, local functions not externally callable) that would trip up any
+future port in this ecosystem.
+
+\begin{longtable}{@{}p{3.6cm}p{11.9cm}@{}}
+\caption{Consolidated defect log.}
+\label{tab:bugs}\\
+\toprule
+Module & Defect and fix \\
+\midrule
+\endfirsthead
+\toprule
+Module & Defect and fix \\
+\midrule
+\endhead
+\pkg{psat\_\hspace{0pt}results.m} & \texttt{DAE.y} orders angles before voltage magnitude, opposite of a first assumption; caught via a known slack-voltage value. \\
+\pkg{psat\_\hspace{0pt}n1\_\hspace{0pt}classify.m}, \pkg{psat\_\hspace{0pt}secure\_\hspace{0pt}atc.m} & Editing \texttt{Line.con} in memory and re-calling \texttt{runpsat('pf')} has no effect (PSAT re-reads from disk every call); fixed by writing a physically modified file to disk. \\
+\pkg{psat\_\hspace{0pt}write\_\hspace{0pt}line\_\hspace{0pt}outage\_\hspace{0pt}file.m} & Three sub-bugs: overwrote the wrong trailing column on a 15-field row; a MATLAB matrix literal required uniform row width; the correct default pad value for an omitted status column is 1 (in service), not 0. \\
+\pkg{psat\_\hspace{0pt}export\_\hspace{0pt}ss.m} & No PSAT routine \texttt{fex\_abcd} exists; the real routine is \texttt{fm\_abcd}, with a different (global-struct) calling convention entirely. \\
+\pkg{psat\_\hspace{0pt}ss\_\hspace{0pt}loader.py} & MATLAB's \texttt{A(:)} flattens column-major; a first draft reshaped row-major, silently transposing non-square matrices. \\
+\pkg{@ESSclass}, \pkg{@GFMclass} & A sign-convention error in how generation is injected into PSAT's power-balance equation caused a genuine small-signal instability (eigenvalue $+25.9$), found via \texttt{sssa}, and found to also affect the already-shipped \pkg{@ESSclass}. \\
+\pkg{decentralized\_\hspace{0pt}opt.py} & Fixed step size $0.5$ caused $\lambda$ to diverge; a coarse grid search (not Brent's method) in the ADMM inner problem left a quantization bias; stopping on aggregate balance alone can mask non-consensus among agents. \\
+\pkg{market\_\hspace{0pt}planning.py} (CVXPY) & Raw CVXPY dual for the balance equality returned the \emph{negative} of the correct LMP. \\
+\pkg{psat\_\hspace{0pt}market\_\hspace{0pt}planning.m} (\texttt{linprog}) & The identical dual-sign bug, independently re-discovered in a different language and solver; fixed the same way (negate, then cross-check against the known-correct uncongested price). \\
+\pkg{most\_\hspace{0pt}scheduling.py} & A quadratic objective is silently rejected by both MILP solvers used; a genuine LODF-formula bug (spurious reactance factor) let a ``security-constrained'' dispatch violate its own limit by 18\,MW. \\
+\pkg{most\_\hspace{0pt}scheduling.py}'s own test script & An independently-written cvxpy cross-check reproduced the slack-bus-left-unconstrained DC-OPF bug already documented from this course's own Week~6 development -- found again, in a brand-new script, months later. \\
+\pkg{stability\_\hspace{0pt}constrained\_\hspace{0pt}opf.py} & \texttt{economic\_dispatch()} crashed with \texttt{TypeError} on genuine infeasibility instead of reporting it; fixed with an explicit \texttt{None} check. \\
+\pkg{psat\_\hspace{0pt}stability\_\hspace{0pt}constrained\_\hspace{0pt}opf.m} & A correct but cosmetically noisy \texttt{quadprog} call on an all-zero Hessian (a pure LP); switched to \texttt{linprog}, identical results, no warning. \\
+\pkg{psat\_\hspace{0pt}gas\_\hspace{0pt}network.m} & MATLAB nested functions closing over outer data produced silent \texttt{NaN}/singular-Jacobian results despite identical arithmetic working as a plain script; fixed with ordinary local functions and explicit arguments. \\
+\pkg{psat\_\hspace{0pt}three\_\hspace{0pt}phase\_\hspace{0pt}distribution.m} & MATLAB's \texttt{'} is conjugate transpose for complex arrays, silently swapping phases B and C; produced a fully converged, wrong answer with no error. \\
+\pkg{test\_\hspace{0pt}psat\_\hspace{0pt}dlr.m} & First draft called a MATLAB \emph{local} function from outside its own file (not externally callable); fixed by testing the externally observable behaviour instead. \\
+\pkg{gnn\_\hspace{0pt}power\_\hspace{0pt}flow.py} & An un-normalized shared loss across two outputs of very different magnitude let one output dominate every gradient step, producing a model worse than a trivial baseline on the other output. \\
+\pkg{wide\_\hspace{0pt}area\_\hspace{0pt}control.py} & Applying the consensus weight matrix once per physical step, rather than repeatedly, is unstable (diverges to tens of thousands of Hz), not merely slow. \\
+\bottomrule
+\end{longtable}
+
+%=============================================================
+\chapter{Known Limitations}
+\label{ch:limitations}
+%=============================================================
+
+\begin{itemize}
+\item \textbf{MATLAB sandbox dependency.} MATLAB/PSAT must be invoked
+  with the development environment's process sandbox disabled; this is a
+  tooling artifact of this specific environment, not a PSAT or MATLAB
+  licensing limitation.
+\item \textbf{Device classes, v1 scope.} \pkg{@ESSclass} and
+  \pkg{@GFMclass} both omit reactive-power support and use a fixed
+  (non-time-varying, non-droop) reference signal; natural v2 extensions
+  are noted in each class's own README.
+\item \textbf{\pkg{dynamic\_\hspace{0pt}line\_\hspace{0pt}rating.py}}'s air-property coefficients
+  are general ideal-gas physics, not independently verified against IEEE
+  738's own specific published tables; results should be treated as
+  representative, not as a drop-in certified calculation.
+\item \textbf{\pkg{gnn\_\hspace{0pt}power\_\hspace{0pt}flow.py}} does not generalize across
+  network topologies; a surrogate trained on one topology must be
+  retrained for another.
+\item \textbf{\pkg{most\_\hspace{0pt}scheduling.py}} and its MATLAB port are
+  DC-network-only (matching MOST's own current released scope); ramping
+  \emph{costs} (as distinct from ramping \emph{limits}) are not
+  separately priced.
+\item \textbf{\pkg{matpower\_\hspace{0pt}to\_\hspace{0pt}psat.py}} converts power-flow/OPF data
+  only; it does not fabricate dynamic (inertia, AVR, governor) data, so
+  converted cases are not ready for time-domain or small-signal analysis
+  without further, separately sourced data.
+\item \textbf{No live-Canvas or production-grid validation.} Every
+  numeric result in this report was verified against an independent
+  method, solver, or closed-form result within this development
+  environment; none of these tools have been validated against a live
+  utility SCADA/EMS system or a production grid deployment.
+\end{itemize}
+
+%=============================================================
+\chapter{Conclusion and Future Work}
+\label{ch:conclusion}
+%=============================================================
+
+This report has documented 25 Python modules, 31 MATLAB functions, and
+two genuine new PSAT device classes, closing every gap identified in
+this project's own \emph{MATPOWER vs.\ PSAT Capability Comparison
+Report} and in two subsequent rounds of ``what else would be valuable
+for modern power systems research'' review. Every capability was
+verified against an independent method before acceptance, and every
+genuine defect found along the way -- 19 of them, spanning sign
+conventions, MATLAB-specific semantics, and optimization-formulation
+pitfalls -- is recorded in Table~\ref{tab:bugs} rather than silently
+corrected and forgotten, because several of these defect \emph{classes}
+recurred more than once and are worth a future developer's attention
+before, not after, they recur a third time.
+
+Natural next steps, in rough priority order: (1) time-varying/droop
+reference signals and reactive-power support for \pkg{@ESSclass}/
+\pkg{@GFMclass}; (2) an AC (rather than DC-only) extension to
+\pkg{most\_\hspace{0pt}scheduling.py}, mirroring MATPOWER MOST's own in-development
+roadmap; (3) a verified reproduction of IEEE 738's own specific
+air-property tables for \pkg{dynamic\_\hspace{0pt}line\_\hspace{0pt}rating.py}; (4) a
+cross-topology-generalizing GNN architecture (e.g.\ explicit
+per-unit/topology-invariant feature engineering) for
+\pkg{gnn\_\hspace{0pt}power\_\hspace{0pt}flow.py}; and (5) validation of the Canvas QTI and
+Mentimeter deliverables documented elsewhere in this project against a
+live Canvas import, the one verification step this development
+environment cannot perform on its own.
+
+\begin{thebibliography}{9}
+\bibitem{milano} F.~Milano, \emph{Power System Modelling and Scripting},
+  Springer, 2010. (PSAT 2.1.11 reference manual and source.)
+\bibitem{zimmerman} R.D.~Zimmerman, C.E.~Murillo-S\'anchez, R.J.~Thomas,
+  ``MATPOWER: Steady-State Operations, Planning, and Analysis Tools for
+  Power Systems Research and Education,'' \emph{IEEE Trans.\ Power
+  Syst.}, 2011.
+\bibitem{most} R.D.~Zimmerman, C.E.~Murillo-S\'anchez, ``MATPOWER
+  Optimal Scheduling Tool (MOST) User's Manual.''
+\bibitem{bertsimas} D.~Bertsimas, M.~Sim, ``The Price of Robustness,''
+  \emph{Operations Research}, 52(1), 2004.
+\bibitem{boyd} S.~Boyd, N.~Parikh, E.~Chu, B.~Peleato, J.~Eckstein,
+  ``Distributed Optimization and Statistical Learning via the Alternating
+  Direction Method of Multipliers,'' \emph{Foundations and Trends in
+  Machine Learning}, 2011.
+\bibitem{liu} Y.~Liu, P.~Ning, M.K.~Reiter, ``False Data Injection
+  Attacks against State Estimation in Electric Power Grids,'' \emph{ACM
+  CCS}, 2009.
+\bibitem{ieee738} IEEE Standard 738-2012, \emph{IEEE Standard for
+  Calculating the Current-Temperature Relationship of Bare Overhead
+  Conductors}.
+\bibitem{glover} J.D.~Glover, T.J.~Overbye, M.S.~Sarma, \emph{Power
+  System Analysis and Design}, Cengage Learning, 6th ed., 2016.
+\bibitem{kundur} P.~Kundur, \emph{Power System Stability and Control},
+  McGraw-Hill, 1994.
+\bibitem{boydconvex} S.~Boyd, L.~Vandenberghe, \emph{Convex
+  Optimization}, Cambridge University Press, 2004.
+\bibitem{bertsekasDP} D.P.~Bertsekas, \emph{Dynamic Programming and
+  Optimal Control}, Vol.\ I--II, Athena Scientific, 4th ed., 2017.
+\bibitem{bertsekasnlp} D.P.~Bertsekas, \emph{Nonlinear Programming},
+  Athena Scientific, 3rd ed., 2016.
+\bibitem{bertsimastsitsiklis} D.~Bertsimas, J.N.~Tsitsiklis,
+  \emph{Introduction to Linear Optimization}, Athena Scientific, 1997.
+\bibitem{hornjohnson} R.A.~Horn, C.R.~Johnson, \emph{Matrix Analysis},
+  Cambridge University Press, 2nd ed., 2012.
+\bibitem{golubvanloan} G.H.~Golub, C.F.~Van Loan, \emph{Matrix
+  Computations}, Johns Hopkins University Press, 4th ed., 2013.
+\bibitem{xiaoboydconsensus} L.~Xiao, S.~Boyd, ``Fast Linear Iterations
+  for Distributed Averaging,'' \emph{Systems \& Control Letters}, 53(1),
+  2004.
+\bibitem{casellaberger} G.~Casella, R.L.~Berger, \emph{Statistical
+  Inference}, Duxbury/Cengage Learning, 2nd ed., 2002.
+\bibitem{aburexposito} A.~Abur, A.G.~Exp\'osito, \emph{Power System
+  State Estimation: Theory and Implementation}, CRC Press, 2004.
+\bibitem{andersonmoore} B.D.O.~Anderson, J.B.~Moore, \emph{Optimal
+  Control: Linear Quadratic Methods}, Prentice Hall, 1990 (Dover
+  reprint, 2007).
+\bibitem{nocedalwright} J.~Nocedal, S.J.~Wright, \emph{Numerical
+  Optimization}, Springer, 2nd ed., 2006.
+\bibitem{birgelouveaux} J.R.~Birge, F.~Louveaux, \emph{Introduction to
+  Stochastic Programming}, Springer, 2nd ed., 2011.
+\bibitem{kersting} W.H.~Kersting, \emph{Distribution System Modeling
+  and Analysis}, CRC Press, 4th ed., 2017.
+\bibitem{chengshirmohammadi} C.S.~Cheng, D.~Shirmohammadi, ``A
+  Three-Phase Power Flow Method for Real-Time Distribution System
+  Analysis,'' \emph{IEEE Trans.\ Power Syst.}, 10(2), 1995.
+\bibitem{graingerstevenson} J.J.~Grainger, W.D.~Stevenson Jr.,
+  \emph{Power System Analysis}, McGraw-Hill, 1994.
+\bibitem{woodwollenberg} A.J.~Wood, B.F.~Wollenberg, G.B.~Sheble,
+  \emph{Power Generation, Operation, and Control}, Wiley, 3rd ed., 2013.
+\bibitem{machowski} J.~Machowski, J.W.~Bialek, J.R.~Bumby, \emph{Power
+  System Dynamics: Stability and Control}, Wiley, 2nd ed., 2008.
+\end{thebibliography}
+
+\end{document}
